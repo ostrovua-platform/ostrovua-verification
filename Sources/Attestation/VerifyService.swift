@@ -9,10 +9,12 @@ import Foundation
 /// DG1/DG2, які реально прочитав. Сервер перевіряє підпис за CSCA
 /// України і збіг хешів. Тут клієнту на слово не вірять.
 struct VerificationEvidence {
-    enum Outcome: String { case passed, failed, heuristic }
+    enum Outcome: String { case passed, failed, heuristic, depth }
 
     var method = "nfc_passport"
-    var liveness: Outcome = .heuristic                   // TODO: real PAD
+    /// .depth — TrueDepth підтвердив обʼємність обличчя (анти-фото);
+    /// .heuristic — пристрій без TrueDepth, лише стабільне обличчя.
+    var liveness: Outcome = .heuristic
     var faceMatch: Outcome
     var faceModel: String                                // "coreml" | "vision_fallback"
     /// EF.SOD з чипа (base64 DER). Містить лише хеші DG, сертифікат

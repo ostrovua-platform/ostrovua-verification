@@ -64,6 +64,11 @@ echo "→ Masterlist: $ML"
 rm -rf certs content.der ml_signer.pem
 mkdir -p certs
 
+fingerprint() {
+  openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null \
+    | sed 's/^.*=//' | tr -d ':' | tr 'A-F' 'a-f'
+}
+
 # 1. Вміст + хто підписав сам masterlist (для контролю очима)
 openssl cms -verify -noverify -inform DER -in "$ML" -out content.der \
   -signer ml_signer.pem 2>/dev/null \
@@ -71,30 +76,81 @@ openssl cms -verify -noverify -inform DER -in "$ML" -out content.der \
 if [ -f ml_signer.pem ]; then
   echo "→ Masterlist підписано:"
   openssl x509 -in ml_signer.pem -noout -subject -issuer | sed 's/^/    /'
+
+  # ── ПІН підписанта masterlist ─────────────────────────────────────
+  # pins_ml_signer.txt (у git, синхронізується з Мака) фіксує SHA-256
+  # відбиток сертифіката підписанта BSI. Якщо відбиток змінився —
+  # або BSI ротував ключ (звір з другим джерелом і онови пін),
+  # або джерело підмінено. У сумніві НЕ оновлюй пін.
+  MLFP=$(fingerprint ml_signer.pem)
+  if [ -f pins_ml_signer.txt ]; then
+    if grep -qi "$MLFP" pins_ml_signer.txt; then
+      echo "  ✓ Відбиток підписанта збігається з піном"
+    else
+      echo "  ✗ ВІДБИТОК ПІДПИСАНТА НЕ ЗБІГАЄТЬСЯ З ПІНОМ!"
+      echo "    очікували: $(cat pins_ml_signer.txt | tr '\n' ' ')"
+      echo "    отримали:  $MLFP"
+      echo "    Джерело могло бути підмінено. СТОП."
+      exit 1
+    fi
+  else
+    echo "  ⚠ Піна підписанта ще немає. Зафіксуй (перший запуск, TOFU):"
+    echo "    поклади цей рядок у backend/auth/csca/pins_ml_signer.txt на Маку:"
+    echo "    $MLFP"
+  fi
 fi
 
 # 2. Окремі сертифікати
 python3 extract_certs.py content.der certs
 
-# 3. Фільтр: лише CSCA України (C=UA) → csca_ua.pem
+# 3. Фільтр: лише CSCA України (C=UA) → csca_ua.pem — З ПІНАМИ.
+#
+#    pins_ua.txt (у git, синхронізується з Мака) — SHA-256 відбитки
+#    ДОВІРЕНИХ українських CSCA. Якщо файл є, у csca_ua.pem потрапляють
+#    ЛИШЕ запінені сертифікати: новий/чужий CSCA у masterlist не стане
+#    коренем довіри мовчки. Новий легітимний UA CSCA додається так:
+#    звір відбиток за ДРУГИМ незалежним джерелом (ICAO PKD, npkd.nl),
+#    допиши рядок у pins_ua.txt, задеплой.
 : > csca_ua.pem
 : > csca_all.pem
-UA=0; ALL=0
+: > pins_ua.generated.txt
+UA=0; ALL=0; SKIPPED=0
+HAVE_PINS=0
+[ -f pins_ua.txt ] && HAVE_PINS=1
+
 for pem in certs/cert_*.pem; do
   SUBJ=$(openssl x509 -in "$pem" -noout -subject 2>/dev/null || echo "")
   cat "$pem" >> csca_all.pem; ALL=$((ALL+1))
   if echo "$SUBJ" | grep -Eq 'C ?= ?UA(,|/|$| )'; then
+    FP=$(fingerprint "$pem")
+    echo "$FP  # $SUBJ" >> pins_ua.generated.txt
+    if [ "$HAVE_PINS" = "1" ] && ! grep -qi "$FP" pins_ua.txt; then
+      SKIPPED=$((SKIPPED+1))
+      echo "  ⚠ UA-сертифікат НЕ в pins_ua.txt — ПРОПУЩЕНО:"
+      echo "      $SUBJ"
+      echo "      відбиток: $FP"
+      continue
+    fi
     cat "$pem" >> csca_ua.pem; UA=$((UA+1))
     echo "  UA: $SUBJ"
     openssl x509 -in "$pem" -noout -dates | sed 's/^/      /'
+    echo "      sha256: $FP"
   fi
 done
 
 echo
-echo "✓ Усього сертифікатів: $ALL, українських (C=UA): $UA"
+echo "✓ Усього сертифікатів: $ALL, українських у довірі: $UA (пропущено непінованих: $SKIPPED)"
+if [ "$HAVE_PINS" = "0" ]; then
+  echo
+  echo "⚠ ПІНІВ ЩЕ НЕМАЄ (перший запуск). Зафіксуй корені довіри:"
+  echo "  1) звір відбитки вище з другим джерелом (ICAO PKD / npkd.nl);"
+  echo "  2) скопіюй pins_ua.generated.txt → backend/auth/csca/pins_ua.txt на Маку"
+  echo "     (scp $(hostname):$(pwd)/pins_ua.generated.txt …/pins_ua.txt);"
+  echo "  3) закоміть у git і задеплой — далі довіра ЗАКРІПЛЕНА."
+fi
 if [ "$UA" -eq 0 ]; then
-  echo "⚠ У цьому masterlist НЕМАЄ українських CSCA — PA не запрацює."
-  echo "  Спробуй інше джерело (ICAO PKD містить UA)."
+  echo "✗ Жодного довіреного українського CSCA — PA не запрацює."
+  [ "$SKIPPED" -gt 0 ] && echo "  Усі UA-сертифікати відсіяні пінами. Перевір pins_ua.txt!"
   exit 1
 fi
 echo "✓ csca_ua.pem готовий (монтується в auth як /app/csca/csca_ua.pem)."

@@ -21,11 +21,22 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
     /// Публичный доступ для живого превью камеры на экране face check.
     let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
+    private let depthOutput = AVCaptureDepthDataOutput()
     private let queue = DispatchQueue(label: "ostrovua.face.liveness.queue")
 
     private var completion: ((Bool) -> Void)?
     private var detectedFrameCount = 0
     private var startedAt: Date?
+
+    /// TrueDepth доступний і налаштований → кожен зарахований кадр
+    /// зобовʼязаний пройти перевірку ОБʼЄМНОСТІ обличчя (анти-фото).
+    private var depthSupported = false
+    /// Остання мапа глибини (пишеться і читається на self.queue).
+    private var latestDepth: AVDepthData?
+
+    /// Який режим liveness РЕАЛЬНО відпрацював — чесно йде на сервер:
+    /// "depth" (TrueDepth: площина = відмова) або "heuristic" (без депту).
+    private(set) var livenessMode: String = "heuristic"
 
     func startCheck(completion: @escaping (Bool) -> Void) {
         self.completion = completion
@@ -45,6 +56,7 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         detectedFrameCount = 0
         startedAt = nil
         completion = nil
+        queue.async { self.latestDepth = nil }
     }
 
     func reset() {
@@ -157,6 +169,44 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
                 }
 
                 self.session.addOutput(self.videoOutput)
+
+                // ── TrueDepth: реальна перевірка обʼємності (анти-фото) ──
+                // Мапа глибини з того ж сенсора, що й Face ID. Плоске
+                // фото/екран не має рельєфу обличчя — такі кадри не
+                // зараховуються. На пристроях без TrueDepth (SE) —
+                // чесний режим "heuristic", сервер це бачить.
+                var depthReady = false
+                if device.deviceType == .builtInTrueDepthCamera,
+                   self.session.canAddOutput(self.depthOutput) {
+                    self.session.addOutput(self.depthOutput)
+                    self.depthOutput.isFilteringEnabled = true
+                    self.depthOutput.setDelegate(self, callbackQueue: self.queue)
+
+                    let depthFormats = device.activeFormat.supportedDepthDataFormats.filter {
+                        let subtype = CMFormatDescriptionGetMediaSubType($0.formatDescription)
+                        return subtype == kCVPixelFormatType_DepthFloat16
+                            || subtype == kCVPixelFormatType_DepthFloat32
+                    }
+                    if let best = depthFormats.max(by: {
+                        CMVideoFormatDescriptionGetDimensions($0.formatDescription).width
+                            < CMVideoFormatDescriptionGetDimensions($1.formatDescription).width
+                    }) {
+                        do {
+                            try device.lockForConfiguration()
+                            device.activeDepthDataFormat = best
+                            device.unlockForConfiguration()
+                            depthReady = true
+                        } catch {
+                            depthReady = false
+                        }
+                    }
+                    if depthReady == false {
+                        self.session.removeOutput(self.depthOutput)
+                    }
+                }
+                self.depthSupported = depthReady
+                self.latestDepth = nil
+
                 self.session.commitConfiguration()
 
                 self.detectedFrameCount = 0
@@ -184,7 +234,19 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         DispatchQueue.main.async { self.faceConfidence = 0 }
     }
 
-    private func handleFaceDetected(pixelBuffer: CVPixelBuffer?) {
+    private func handleFaceDetected(pixelBuffer: CVPixelBuffer?, faceBox: CGRect) {
+        // ── Ворота глибини (TrueDepth) ────────────────────────────────
+        // Кадр зараховується ЛИШЕ якщо мапа глибини показує рельєф
+        // обличчя. Плоске фото/екран (навіть нахилене — площину-фіт
+        // нахил не обманює) кадрів не набере → таймаут. Кадр без
+        // свіжої глибини просто не зараховується (без скидання).
+        if depthSupported {
+            guard let depth = latestDepth,
+                  Self.isVolumetricFace(depth, faceBox: faceBox) else {
+                return
+            }
+        }
+
         detectedFrameCount += 1
 
         let confidence = min(Double(detectedFrameCount) / 12.0, 1)
@@ -200,6 +262,9 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         if detectedFrameCount >= 12 {
             session.stopRunning()
 
+            // Чесний режим для сервера: що РЕАЛЬНО перевірено
+            livenessMode = depthSupported ? "depth" : "heuristic"
+
             // Сохраняем кадр лица для сверки с фото из чипа (DG2)
             let faceImage = pixelBuffer.flatMap { Self.makeImage(from: $0) }
 
@@ -209,6 +274,84 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
                 self.complete(success: true)
             }
         }
+    }
+
+    // MARK: - Обʼємність обличчя за мапою глибини (анти-фото/екран)
+
+    /// Least-squares площина по центральному вікну кадру глибини +
+    /// RMS-залишок. Фото/екран — площина (залишок ~шум сенсора, <2–3 мм)
+    /// незалежно від нахилу. Живе обличчя — ніс/щоки дають кривизну,
+    /// залишок ≥ ~5 мм. Це НЕ сертифікований PAD (маска обманить),
+    /// але клас атак «фото та відео з екрана» закриває по-справжньому.
+    private static func isVolumetricFace(_ depthData: AVDepthData, faceBox: CGRect) -> Bool {
+        let depth32: AVDepthData
+        if depthData.depthDataType == kCVPixelFormatType_DepthFloat32 {
+            depth32 = depthData
+        } else {
+            depth32 = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
+        }
+
+        let map = depth32.depthDataMap
+        CVPixelBufferLockBaseAddress(map, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
+
+        guard let base = CVPixelBufferGetBaseAddress(map) else { return false }
+        let width = CVPixelBufferGetWidth(map)
+        let height = CVPixelBufferGetHeight(map)
+        let rowBytes = CVPixelBufferGetBytesPerRow(map)
+
+        // Вікно: центр кадру, сторона ~ розміру обличчя (обличчя і так
+        // з-gate-но по центру й розміру перед цим викликом).
+        let minDim = CGFloat(min(width, height))
+        let side = Int(max(0.18, min(0.5, min(faceBox.width, faceBox.height) * 0.7)) * minDim)
+        let x0 = (width - side) / 2
+        let y0 = (height - side) / 2
+
+        // Сітка 20×20: точки (x, y, z)
+        var xs: [Double] = [], ys: [Double] = [], zs: [Double] = []
+        let grid = 20
+        let step = max(1, side / grid)
+
+        for gy in stride(from: y0, to: y0 + side, by: step) {
+            let row = base.advanced(by: gy * rowBytes).assumingMemoryBound(to: Float32.self)
+            for gx in stride(from: x0, to: x0 + side, by: step) {
+                let z = Double(row[gx])
+                // Валідна дистанція обличчя: 15 см — 1 м
+                if z.isFinite, z > 0.15, z < 1.0 {
+                    xs.append(Double(gx)); ys.append(Double(gy)); zs.append(z)
+                }
+            }
+        }
+
+        // Мало валідних точок → сенсор не бачить рельєфу (не зараховуємо)
+        let expected = (side / step) * (side / step)
+        guard zs.count >= max(30, expected * 55 / 100) else { return false }
+
+        // Площина z = ax + by + c: нормальні рівняння 3×3 (Крамер)
+        let n = Double(zs.count)
+        var sx = 0.0, sy = 0.0, sz = 0.0, sxx = 0.0, syy = 0.0, sxy = 0.0, sxz = 0.0, syz = 0.0
+        for i in 0..<zs.count {
+            let x = xs[i], y = ys[i], z = zs[i]
+            sx += x; sy += y; sz += z
+            sxx += x * x; syy += y * y; sxy += x * y
+            sxz += x * z; syz += y * z
+        }
+        let det = sxx * (syy * n - sy * sy) - sxy * (sxy * n - sy * sx) + sx * (sxy * sy - syy * sx)
+        guard abs(det) > 1e-9 else { return false }
+
+        let a = (sxz * (syy * n - sy * sy) - sxy * (syz * n - sy * sz) + sx * (syz * sy - syy * sz)) / det
+        let b = (sxx * (syz * n - sz * sy) - sxz * (sxy * n - sx * sy) + sx * (sxy * sz - sx * syz)) / det
+        let c = (sxx * (syy * sz - sy * syz) - sxy * (sxy * sz - sx * syz) + sxz * (sxy * sy - sx * syy)) / det
+
+        var ss = 0.0
+        for i in 0..<zs.count {
+            let r = zs[i] - (a * xs[i] + b * ys[i] + c)
+            ss += r * r
+        }
+        let rms = (ss / n).squareRoot()
+
+        // Рельєф живого обличчя: RMS-залишок від площини ≥ 5 мм
+        return rms >= 0.005
     }
 
     private static func makeImage(from pixelBuffer: CVPixelBuffer) -> UIImage? {
@@ -237,6 +380,18 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
                 self.complete(success: false)
             }
         }
+    }
+}
+
+extension FaceLivenessManager: AVCaptureDepthDataOutputDelegate {
+    func depthDataOutput(
+        _ output: AVCaptureDepthDataOutput,
+        didOutput depthData: AVDepthData,
+        timestamp: CMTime,
+        connection: AVCaptureConnection
+    ) {
+        // Той самий queue, що й відео — гонок немає
+        latestDepth = depthData
     }
 }
 
@@ -317,7 +472,7 @@ extension FaceLivenessManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         // Всё хорошо — прогресс идёт
         setGuidance(nil)
-        handleFaceDetected(pixelBuffer: pixelBuffer)
+        handleFaceDetected(pixelBuffer: pixelBuffer, faceBox: box)
     }
 
     private func setGuidance(_ text: String?) {

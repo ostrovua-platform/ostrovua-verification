@@ -802,7 +802,7 @@ struct VerificationView: View {
                         // Authentication (підпис держави → CSCA України).
                         // Персональні поля документа не передаються.
                         let evidence = VerificationEvidence(
-                            liveness: .heuristic,                   // TODO: real PAD
+                            liveness: faceManager.livenessMode == "depth" ? .depth : .heuristic,
                             faceMatch: .passed,
                             faceModel: result.model,
                             sodBase64: nfcManager.chipSOD?.base64EncodedString(),
