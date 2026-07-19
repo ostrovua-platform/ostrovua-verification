@@ -2,17 +2,26 @@ import Foundation
 
 /// Докази перевірки, що застосунок ЧЕСНО повідомляє серверу.
 /// Значення — enum, а не «все пройдено»: сервер бачить, що саме
-/// виконано (наприклад, passiveAuthentication ще НЕ реалізовано),
-/// і вирішує, який рівень довіри видати.
+/// виконано, і вирішує, який рівень довіри видати.
+///
+/// Passive Authentication робить СЕРВЕР: клієнт передає SOD (підписаний
+/// державою обʼєкт з хешами груп даних — БЕЗ імені/номера/фото) і хеші
+/// DG1/DG2, які реально прочитав. Сервер перевіряє підпис за CSCA
+/// України і збіг хешів. Тут клієнту на слово не вірять.
 struct VerificationEvidence {
-    enum Outcome: String { case passed, failed, notPerformed = "not_performed", heuristic }
+    enum Outcome: String { case passed, failed, heuristic }
 
     var method = "nfc_passport"
-    var passiveAuthentication: Outcome = .notPerformed   // TODO: server-side CSCA
     var liveness: Outcome = .heuristic                   // TODO: real PAD
     var faceMatch: Outcome
     var faceModel: String                                // "coreml" | "vision_fallback"
-    var protocolVersion = 2
+    /// EF.SOD з чипа (base64 DER). Містить лише хеші DG, сертифікат
+    /// і підпис — жодного персонального поля документа.
+    var sodBase64: String?
+    /// Хеші прочитаних груп даних: "dg1"/"dg2" → алгоритм → hex.
+    /// Кілька алгоритмів — бо сервер порівнює тим, що вказаний у SOD.
+    var dgHashes: [String: [String: String]] = [:]
+    var protocolVersion = 3
 }
 
 enum VerifyService {
@@ -27,15 +36,20 @@ enum VerifyService {
     static func approve(evidence: VerificationEvidence) async throws -> Bool {
         guard let token = AuthStore.token else { throw APIError.notLoggedIn }
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "method": evidence.method,
-            "passiveAuthentication": evidence.passiveAuthentication.rawValue,
             "liveness": evidence.liveness.rawValue,
             "faceMatch": evidence.faceMatch.rawValue,
             "faceModel": evidence.faceModel,
             "protocolVersion": evidence.protocolVersion,
             "endpoint": "/auth/verify/approve"
         ]
+        // SOD + хеші DG — для серверної Passive Authentication.
+        // Assertion підписує і їх: підмінити SOD після підпису неможливо.
+        if let sod = evidence.sodBase64 {
+            body["sod"] = sod
+            body["dgHashes"] = evidence.dgHashes
+        }
 
         // Assertion привʼязаний саме до цих байтів payload
         let attest = try await AppAttestService.assertionHeaders(for: body)

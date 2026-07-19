@@ -797,11 +797,16 @@ struct VerificationView: View {
                         // Обличчя збіглось → ЧЕСНІ докази на сервер.
                         // Успіх показуємо ЛИШЕ після підтвердження бази,
                         // а не до нього (раніше UI брехав про Verified).
+                        //
+                        // SOD + хеші DG — сервер САМ виконує Passive
+                        // Authentication (підпис держави → CSCA України).
+                        // Персональні поля документа не передаються.
                         let evidence = VerificationEvidence(
-                            passiveAuthentication: .notPerformed,   // TODO: server-side CSCA
                             liveness: .heuristic,                   // TODO: real PAD
                             faceMatch: .passed,
-                            faceModel: result.model
+                            faceModel: result.model,
+                            sodBase64: nfcManager.chipSOD?.base64EncodedString(),
+                            dgHashes: nfcManager.dgHashes
                         )
                         let saved = await CurrentSession.shared.markVerified(evidence: evidence)
 

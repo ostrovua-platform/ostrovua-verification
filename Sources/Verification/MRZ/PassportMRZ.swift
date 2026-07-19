@@ -75,13 +75,10 @@ struct PassportMRZ: Equatable {
 
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
-        // isValidDate вимагає, щоб компоненти існували в календарі
-        // (31 лютого не існує — поверне false).
-        guard calendar.date(from: components) != nil,
-              calendar.date(components, matchesComponents: DateComponents(year: year, month: mm, day: dd)) != false
-        else { return nil }
 
-        // Додаткова строга перевірка: збираємо дату й розбираємо назад
+        // Строга перевірка: збираємо дату й розбираємо назад.
+        // Неіснуюча дата (31 лютого) «переповниться» в наступний місяць
+        // і компоненти не збіжаться — відхиляємо.
         guard let date = calendar.date(from: components) else { return nil }
         let back = calendar.dateComponents([.year, .month, .day], from: date)
         guard back.year == year, back.month == mm, back.day == dd else { return nil }

@@ -8,33 +8,39 @@
 
 ## Головна гарантія приватності
 
-Паспортні дані НЕ передаються на сервер і не покидають телефон.
-Мережеві запити верифікації (challenge → assertion → approve; 2–4
-запити залежно від того, чи вже зареєстрований App Attest-ключ)
-несуть лише результати перевірок як enum, а не дані документа:
+Персональні поля документа НЕ передаються на сервер: ані номер, ані
+імʼя, ані дата народження, ані фото. Мережеві запити верифікації
+(challenge → assertion → approve) несуть результати перевірок і
+криптографічні артефакти — не дані людини:
 
 ```json
 POST /auth/verify/approve   // тіло — канонічний payload, підписаний App Attest
 {
   "method": "nfc_passport",
-  "passiveAuthentication": "not_performed",
   "liveness": "heuristic",
   "faceMatch": "passed",
   "faceModel": "coreml",
-  "protocolVersion": 2,
+  "sod": "<EF.SOD, base64>",
+  "dgHashes": { "dg1": { "sha256": "…" }, "dg2": { "sha256": "…" } },
+  "protocolVersion": 3,
   "challengeId": "…"
 }
 ```
 
-Ні номера документа, ні імені, ні дати народження, ні фото. Сервер
-зберігає `verified`, дату й метод (`docs/server-side.md`).
+**Що таке `sod` і чому це не «паспортні дані».** EF.SOD — обʼєкт
+безпеки чипа (ICAO 9303): хеші груп даних + сертифікат Document
+Signer + підпис держави. У ньому НЕМАЄ жодного персонального поля.
+Сервер перевіряє за ним справжність документа (Passive
+Authentication: підпис → DSC → CSCA України) і одразу видаляє;
+у базі лишається тільки `verified`, дата й метод
+(`docs/server-side.md`, `Server/passiveauth.js`).
 
-> **Чесно про рівень довіри.** Assertion App Attest тепер ПРИВʼЯЗАНИЙ
-> до цього payload (hash = challenge ‖ canonicalPayload), а сервер
-> перевіряє assertion counter (replay). Але поки
-> `passiveAuthentication` != `passed`, сервер НЕ має криптодоказу
-> справжності чипа — це «базовий», а не «сильний» Verified ID.
-> Див. `docs/threat-model.md`.
+> **Чесна межа.** Хеші в SOD унікальні для конкретного документа —
+> дані з них відновити не можна, але це технічний ідентифікатор
+> примірника документа. Ми його НЕ зберігаємо. І друге: PA доводить
+> справжність ДАНИХ чипа, але не ловить точну копію чипа (клон) —
+> для цього існує Chip/Active Authentication, це наступний етап
+> (`docs/threat-model.md`).
 
 ## Як працює перевірка (усе — на пристрої)
 
@@ -55,10 +61,14 @@ POST /auth/verify/approve   // тіло — канонічний payload, під
    > presentation-attack detection. Захист від фото/відео/маски
    > потребує TrueDepth/активних дій — заплановано. README раніше
    > переоцінював це як «depth/LiDAR» — виправлено.
-4. **Підтвердження** (`Sources/Attestation`) — App Attest доводить
-   серверу, що запит іде зі справжнього застосунку на справжньому
-   iPhone (обійти перевірку скриптом не можна), після чого сервер
-   ставить прапорець Verified ID.
+4. **Підтвердження** (`Sources/Attestation` + `Server/`) — два
+   незалежні докази:
+   - **App Attest**: запит іде зі справжнього, незміненого застосунку
+     на справжньому iPhone; assertion підписує САМЕ цей payload.
+   - **Passive Authentication (сервер)**: підпис держави над даними
+     чипа перевіряється за CSCA України (`Server/passiveauth.js`).
+     Битий/підроблений SOD або розбіжність хешів DG — відмова.
+   Лише після цього сервер ставить прапорець Verified ID.
 
 ## Що НЕ відбувається
 
@@ -74,7 +84,9 @@ POST /auth/verify/approve   // тіло — канонічний payload, під
 
 ```
 Sources/Verification/   — кроки перевірки: MRZ → NFC → face check
-Sources/Attestation/    — App Attest + єдиний запит approve
+Sources/Attestation/    — App Attest + запит approve (канонічний payload)
+Server/                 — Passive Authentication: passiveauth.js (дослівно
+                          з продакшену) + скрипти CSCA masterlist
 docs/server-side.md     — серверний обробник: що саме пишеться в базу
 ```
 
@@ -94,12 +106,20 @@ Open source of the identity-verification module of **OstrovUA**.
 Published so anyone can audit one claim: **passport data is never
 collected and never leaves the phone.**
 
-The only network call after a successful check is
-`POST /auth/verify/approve` with `{ "method", "challengeId" }` —
-no document fields. The server stores `verified: true`, a timestamp
-and the method string, nothing else (see `docs/server-side.md`).
+The approve request carries check results and cryptographic
+artifacts only — no document fields: outcome enums, the chip's
+EF.SOD (state-signed data-group hashes + certificate — no personal
+fields) and DG1/DG2 hashes. The server performs ICAO 9303 Passive
+Authentication against the Ukrainian CSCA masterlist
+(`Server/passiveauth.js`), then discards the SOD; it stores
+`verified: true`, a timestamp and the method string, nothing else
+(see `docs/server-side.md`).
 
 MRZ is used solely as the ICAO 9303 BAC/PACE access key to the NFC
 chip; DG1/DG2 chip data and face embeddings live in process memory
 only — no disk writes, no logs, no uploads. App Attest proves the
-request comes from a genuine app on a genuine device.
+request comes from a genuine app on a genuine device and binds the
+assertion to this exact payload. Known limit (documented in
+`docs/threat-model.md`): PA proves data authenticity, not chip
+uniqueness — clone detection (Chip/Active Authentication) is the
+next milestone.

@@ -16,7 +16,10 @@ grep -rn "URLRequest\|URLSession" Sources/Verification
 # очікування: порожньо (уся мережа — в Sources/Attestation)
 
 grep -rn "httpBody" Sources/Attestation
-# очікування: тіла запитів — challenge/attest-ключі та {method, challengeId}
+# очікування: challenge/attest-ключі та канонічний payload approve:
+# enum-результати + sod (EF.SOD: хеші DG + сертифікат + підпис держави,
+# БЕЗ персональних полів) + dgHashes. Жодного поля документа.
+# Серверна перевірка SOD — Server/passiveauth.js (Passive Authentication).
 ```
 
 **3. Структура PassportData ніде не серіалізується у цьому модулі:**
@@ -48,7 +51,9 @@ grep -rn "chipPhoto\|passportImage" Sources
   конвертований FaceNet) у репозиторій не включена через розмір (45 МБ);
   `FaceEmbedder.swift` показує, як вона використовується, з фолбеком
   на Vision `VNFeaturePrint`.
-- Читання чипа — бібліотека [NFCPassportReader](https://github.com/AndyQ/NFCPassportReader) (MIT).
-- Passive Authentication (перевірка підпису даних чипа за CSCA-сертифікатами)
-  — у беті ще не увімкнена; заплановано. Це вплине на стійкість до
-  підроблених чипів, але не на приватність — модель даних не зміниться.
+- Читання чипа — бібліотека [NFCPassportReader](https://github.com/AndyQ/NFCPassportReader)
+  (MIT), закріплена версія 2.3.2 (Package.resolved).
+- Passive Authentication — реалізована СЕРВЕРНО: `Server/passiveauth.js`
+  (перевірка підпису SOD, ланцюжок DSC→CSCA України, звірка хешів DG).
+  Режим розкатки: `PA_ENFORCE=0` (лог) → `PA_ENFORCE=1` (жорстко).
+  Клони чипів (той самий SOD) PA не ловить — див. threat-model.md.

@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import UIKit
+import CryptoKit
 
 #if canImport(NFCPassportReader) && !targetEnvironment(simulator)
 import NFCPassportReader
@@ -14,6 +15,15 @@ final class NFCVerificationManager: NSObject, ObservableObject {
 
     /// Фото владельца с чипа (DG2) — используется на шаге face check.
     @Published private(set) var chipPhoto: UIImage?
+
+    /// EF.SOD — підписаний державою обʼєкт безпеки чипа (хеші DG +
+    /// сертифікат + підпис, БЕЗ персональних полів). Іде на сервер
+    /// для Passive Authentication. На симуляторі — nil.
+    private(set) var chipSOD: Data?
+
+    /// Хеші прочитаних груп даних ("dg1"/"dg2" → алгоритм → hex).
+    /// Сервер звіряє їх з хешами, підписаними державою в SOD.
+    private(set) var dgHashes: [String: [String: String]] = [:]
 
     /// Читает чип. В completion приходит PassportData с данными
     /// с чипа (или nil при ошибке/неукраинском документе).
@@ -33,6 +43,19 @@ final class NFCVerificationManager: NSObject, ObservableObject {
     func reset() {
         result = .notStarted
         chipPhoto = nil
+        chipSOD = nil
+        dgHashes = [:]
+    }
+
+    /// SHA-1/256/384/512 одним махом: сервер порівнює тим алгоритмом,
+    /// який записано в SOD (український — SHA-256, але не вгадуємо).
+    private static func allHashes(_ data: Data) -> [String: String] {
+        [
+            "sha1": Insecure.SHA1.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+            "sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+            "sha384": SHA384.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+            "sha512": SHA512.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+        ]
     }
 
     // MARK: - Реальное чтение (устройство)
@@ -44,7 +67,7 @@ final class NFCVerificationManager: NSObject, ObservableObject {
                 let reader = PassportReader()
                 let passport = try await reader.readPassport(
                     mrzKey: mrz.bacKey,
-                    tags: [.COM, .DG1, .DG2],
+                    tags: [.COM, .SOD, .DG1, .DG2],
                     customDisplayMessage: { message in
                         switch message {
                         case .requestPresentPassport:
@@ -104,6 +127,29 @@ final class NFCVerificationManager: NSObject, ObservableObject {
 
                 // Фото владельца из DG2 — для сверки лица на шаге 4
                 self.chipPhoto = passport.passportImage
+
+                // SOD + хеші DG1/DG2 — для серверної Passive Authentication.
+                // FAIL-CLOSED: без SOD сервер не зможе довести справжність
+                // чипа, тож без нього далі не пускаємо (SOD — обовʼязковий
+                // файл ICAO 9303; його відсутність = недочитаний чип).
+                guard
+                    let sodGroup = passport.getDataGroup(.SOD),
+                    let dg1Group = passport.getDataGroup(.DG1),
+                    let dg2Group = passport.getDataGroup(.DG2)
+                else {
+                    self.chipPhoto = nil
+                    self.result = .failed(
+                        "Не вдалося зчитати обʼєкт безпеки чипа (SOD). Тримай документ нерухомо і спробуй ще раз. (E-405)"
+                    )
+                    completion(nil)
+                    return
+                }
+
+                self.chipSOD = Data(sodGroup.data)
+                self.dgHashes = [
+                    "dg1": Self.allHashes(Data(dg1Group.data)),
+                    "dg2": Self.allHashes(Data(dg2Group.data)),
+                ]
 
                 self.result = .success("Документ України підтверджено: \(fullName.isEmpty ? data.documentNumber : fullName)")
                 completion(data)
