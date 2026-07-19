@@ -83,6 +83,7 @@ if [ -f ml_signer.pem ]; then
   # або BSI ротував ключ (звір з другим джерелом і онови пін),
   # або джерело підмінено. У сумніві НЕ оновлюй пін.
   MLFP=$(fingerprint ml_signer.pem)
+  echo "$MLFP  # $(openssl x509 -in ml_signer.pem -noout -subject | sed 's/^subject=//')" > pins_ml_signer.generated.txt
   if [ -f pins_ml_signer.txt ]; then
     if grep -qi "$MLFP" pins_ml_signer.txt; then
       echo "  ✓ Відбиток підписанта збігається з піном"
@@ -94,9 +95,9 @@ if [ -f ml_signer.pem ]; then
       exit 1
     fi
   else
-    echo "  ⚠ Піна підписанта ще немає. Зафіксуй (перший запуск, TOFU):"
-    echo "    поклади цей рядок у backend/auth/csca/pins_ml_signer.txt на Маку:"
+    echo "  ⚠ Піна підписанта ще немає (перший запуск). Відбиток:"
     echo "    $MLFP"
+    echo "    Записано в pins_ml_signer.generated.txt — забери на Мак як pins_ml_signer.txt."
   fi
 fi
 

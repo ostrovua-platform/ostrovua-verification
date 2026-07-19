@@ -64,8 +64,12 @@ assertion App Attest підписує весь payload разом із SOD.
 - `pins_ml_signer.txt` — відбиток підписанта самого masterlist
   (BSI CSCA Master List Signer). Зміна відбитка зупиняє оновлення
   до ручної перевірки.
-- Первинна фіксація — TOFU з обовʼязковою звіркою за двома
-  джерелами (процедура в `Server/fetch_masterlist.sh`).
+- Первинна фіксація — TOFU зі звіркою за двома незалежними
+  джерелами: BSI masterlist + знімок ICAO PKD
+  (`Server/fetch_masterlist.sh`, `Server/crosscheck_icao.sh`).
+  Сертифікати 2015/2020 підтверджуються обома; київські 2024 —
+  поки лише BSI (у знімку ICAO 2022 їх ще не існувало) — чесно
+  позначено у виводі скрипта.
 
 **9. Liveness: реальна перевірка обʼємності (TrueDepth).**
 На пристроях з TrueDepth (усі Face ID iPhone) кожен зарахований
