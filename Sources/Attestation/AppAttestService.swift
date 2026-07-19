@@ -60,15 +60,24 @@ enum AppAttestService {
         #endif
     }
 
-    /// Готує заголовки для захищеного запиту.
-    /// Повертає (headers, challengeId) — challengeId треба покласти в тіло.
-    static func assertionHeaders(for body: [String: Any]) async throws -> (headers: [String: String], challengeId: String) {
+    /// Готує заголовки для захищеного запиту, ПРИВʼЯЗАНІ до payload.
+    ///
+    /// Раніше assertion підписував лише хеш челенджу, а тіло запиту
+    /// (`body`) ігнорувалось — тож сервер не мав доказу, що клієнт
+    /// стверджує саме ці результати (метод, liveness, faceMatch тощо).
+    /// Тепер clientDataHash = SHA256(challenge ‖ canonicalPayload), і
+    /// canonicalPayload повертається клієнту, щоб надіслати ТОЧНО ті ж
+    /// байти. Сервер зобовʼязаний перевіряти assertion над тим самим
+    /// digest та лічильник assertion counter (replay-protection).
+    ///
+    /// Повертає (headers, canonicalPayload) — payload іде тілом запиту
+    /// дослівно, як рядок.
+    static func assertionHeaders(for body: [String: Any]) async throws -> (headers: [String: String], canonicalPayload: String) {
         #if canImport(DeviceCheck) && !targetEnvironment(simulator)
         guard DCAppAttestService.shared.isSupported else { throw AppAttestError.unsupported }
 
         let service = DCAppAttestService.shared
 
-        // Ключ пристрою: створюємо один раз і реєструємо на сервері
         let keyId: String
         if let existing = storedKeyId {
             keyId = existing
@@ -76,43 +85,56 @@ enum AppAttestService {
             keyId = try await registerNewKey(service: service)
         }
 
-        // Свіжий одноразовий челендж під саме цей запит
         let (challengeId, challenge) = try await requestChallenge()
 
-        do {
-            let assertion = try await service.generateAssertion(
-                keyId,
-                clientDataHash: Data(SHA256.hash(data: challenge))
-            )
+        // Канонічний payload: детермінований JSON (сортовані ключі),
+        // разом із challengeId — саме ці байти підписує assertion
+        var payloadObject = body
+        payloadObject["challengeId"] = challengeId
+        let canonical = try Self.canonicalJSON(payloadObject)
 
+        // clientDataHash над challenge ‖ canonicalPayload
+        var signedData = challenge
+        signedData.append(canonical)
+        let clientDataHash = Data(SHA256.hash(data: signedData))
+
+        do {
+            let assertion = try await service.generateAssertion(keyId, clientDataHash: clientDataHash)
             return (
-                headers: [
-                    "x-app-attest": assertion.base64EncodedString(),
-                    "x-attest-key": keyId
-                ],
-                challengeId: challengeId
+                headers: ["x-app-attest": assertion.base64EncodedString(), "x-attest-key": keyId],
+                canonicalPayload: String(decoding: canonical, as: UTF8.self)
             )
         } catch {
-            // Ключ міг стати недійсним (перевстановлення, зміна акаунта) —
-            // пробуємо один раз перереєструвати
+            // Ключ протух — перереєстровуємо і будуємо payload заново
             storedKeyId = nil
             let freshKeyId = try await registerNewKey(service: service)
             let (newChallengeId, newChallenge) = try await requestChallenge()
+
+            var freshPayload = body
+            freshPayload["challengeId"] = newChallengeId
+            let freshCanonical = try Self.canonicalJSON(freshPayload)
+
+            var freshSigned = newChallenge
+            freshSigned.append(freshCanonical)
+
             let assertion = try await service.generateAssertion(
                 freshKeyId,
-                clientDataHash: Data(SHA256.hash(data: newChallenge))
+                clientDataHash: Data(SHA256.hash(data: freshSigned))
             )
             return (
-                headers: [
-                    "x-app-attest": assertion.base64EncodedString(),
-                    "x-attest-key": freshKeyId
-                ],
-                challengeId: newChallengeId
+                headers: ["x-app-attest": assertion.base64EncodedString(), "x-attest-key": freshKeyId],
+                canonicalPayload: String(decoding: freshCanonical, as: UTF8.self)
             )
         }
         #else
         throw AppAttestError.unsupported
         #endif
+    }
+
+    /// Детермінований JSON: сортовані ключі, без пробілів — щоб клієнт
+    /// і сервер рахували однаковий digest байт-у-байт.
+    private static func canonicalJSON(_ object: [String: Any]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
     // MARK: - Кроки протоколу

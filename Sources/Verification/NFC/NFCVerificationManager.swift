@@ -70,9 +70,16 @@ final class NFCVerificationManager: NSObject, ObservableObject {
                     .replacingOccurrences(of: "<", with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
-                // ВАЖНО: пропускаем только документы України.
-                // Данные читаются с самого чипа — их нельзя подделать вводом.
-                guard issuing == "UKR" || nationality == "UKR" else {
+                // Бізнес-правило: приймаємо лише УКРАЇНСЬКИЙ ДОКУМЕНТ
+                // (issuing == UKR). Раніше умова була `issuing || nationality`,
+                // тобто проходив і чужий документ українця — це не те, що
+                // стверджував коментар.
+                //
+                // ⚠️ ОБМЕЖЕННЯ: ці поля читаються з чипа, але їхня
+                // ПІДЛИННІСТЬ поки не перевірена криптографічно
+                // (Passive Authentication — server-side, у планах).
+                // Тобто клонований/підроблений чип тут ще не відсіється.
+                guard issuing == "UKR" else {
                     let issuer = issuing.isEmpty ? nationality : issuing
                     self.result = .failed(
                         "Підтримуються лише документи України. Цей документ видано: \(issuer.isEmpty ? "невідомо" : issuer)."

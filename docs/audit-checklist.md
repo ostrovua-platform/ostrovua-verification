@@ -19,12 +19,15 @@ grep -rn "httpBody" Sources/Attestation
 # очікування: тіла запитів — challenge/attest-ключі та {method, challengeId}
 ```
 
-**3. Структура PassportData ніде не серіалізується:**
+**3. Структура PassportData ніде не серіалізується у цьому модулі:**
 
 ```bash
-grep -rn "PassportData" Sources | grep -i "encode\|json\|codable"
-# очікування: порожньо — структура не Codable, серіалізувати її нічим
-```
+grep -rn "PassportData" Sources | grep -i "JSONSerialization\|JSONEncoder\|httpBody"
+# очікування: порожньо
+# ЗАСТЕРЕЖЕННЯ: те, що PassportData не Codable, НЕ доводить неможливість
+# серіалізації — її поля можна вручну покласти в JSONSerialization.
+# Ця перевірка показує лише, що В ЦЬОМУ МОДУЛІ такого немає. Повний
+# доказ потребує аудиту всього застосунку (CurrentSession, API-клієнт).
 
 **4. Фото з чипа (DG2) використовується лише для локальної звірки:**
 

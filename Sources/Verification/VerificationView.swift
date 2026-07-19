@@ -69,6 +69,21 @@ struct VerificationView: View {
         }
         .statusBarHidden(true)
         .animation(.easeInOut(duration: 0.25), value: screen)
+        // Камера/сканери не мають лишатись активними за межами екрана
+        .onChange(of: screen) { _, newScreen in
+            if newScreen != .face {
+                faceManager.stop()
+            }
+            if newScreen != .mrz {
+                mrzScanner.stop()
+            }
+        }
+        .onDisappear {
+            faceManager.stop()
+            mrzScanner.stop()
+            nfcManager.reset()
+            wipeSensitiveData()
+        }
     }
 
     // MARK: - Каркас шага (топбар + прогресс + pill «Крок N з 4»)
@@ -760,33 +775,58 @@ struct VerificationView: View {
                 let chipPhoto = nfcManager.chipPhoto,
                 let liveFace = faceManager.capturedFace
             else {
-                // Фото с чипа нет (например, симулятор) — пропускаем сверку
-                wipeSensitiveData()
-                screen = .success
+                // FAIL-CLOSED: немає фото з чипа (DG2) або кадру обличчя —
+                // сверку зробити НЕМОЖЛИВО, тож верифікація НЕ проходить.
+                // Раніше тут був fail-open (одразу «успіх») — критична дірка:
+                // документ без читабельного DG2 підтверджувався без обличчя.
+                faceMatchError = trs("Не вдалося прочитати фото з чипа документа. Верифікація неможлива без звірки обличчя.")
+                faceManager.reset()
                 return
             }
 
+            // Блокуємо повторний запуск, поки триває звірка/підтвердження
+            guard isMatchingFace == false else { return }
             isMatchingFace = true
 
             Task {
                 do {
-                    let verdict = try await FaceMatcher.match(chipPhoto: chipPhoto, liveFace: liveFace)
+                    let result = try await FaceMatcher.match(chipPhoto: chipPhoto, liveFace: liveFace)
 
-                    await MainActor.run {
-                        isMatchingFace = false
+                    switch result.verdict {
+                    case .match:
+                        // Обличчя збіглось → ЧЕСНІ докази на сервер.
+                        // Успіх показуємо ЛИШЕ після підтвердження бази,
+                        // а не до нього (раніше UI брехав про Verified).
+                        let evidence = VerificationEvidence(
+                            passiveAuthentication: .notPerformed,   // TODO: server-side CSCA
+                            liveness: .heuristic,                   // TODO: real PAD
+                            faceMatch: .passed,
+                            faceModel: result.model
+                        )
+                        let saved = await CurrentSession.shared.markVerified(evidence: evidence)
 
-                        switch verdict {
-                        case .match:
-                            // PRIVACY: верификация пройдена — данные документа
-                            // немедленно стираются. Остаётся только статус.
-                            wipeSensitiveData()
-                            screen = .success
+                        await MainActor.run {
+                            isMatchingFace = false
+                            if saved {
+                                wipeSensitiveData()
+                                screen = .success
+                            } else {
+                                faceMatchError = session.verifySyncError
+                                    ?? trs("Сервер не підтвердив статус.")
+                                faceManager.reset()
+                            }
+                        }
 
-                        case .uncertain(let similarity):
+                    case .uncertain(let similarity):
+                        await MainActor.run {
+                            isMatchingFace = false
                             faceMatchError = "Не вдалося впевнено зіставити обличчя (схожість \(Int(similarity * 100))%). Спробуй ще раз при кращому освітленні, без окулярів."
                             faceManager.reset()
+                        }
 
-                        case .noMatch:
+                    case .noMatch:
+                        await MainActor.run {
+                            isMatchingFace = false
                             faceMatchError = "Обличчя не збігається з фото з чипа документа. Верифікацію може пройти лише власник документа."
                             faceManager.reset()
                         }
@@ -794,7 +834,7 @@ struct VerificationView: View {
                 } catch {
                     await MainActor.run {
                         isMatchingFace = false
-                        faceMatchError = trs("Не вдалося виконати звірку. Спробуй ще раз при кращому освітленні.") + " (E-401)"
+                        faceMatchError = AppErrors.text(error) + " (E-401)"
                         faceManager.reset()
                     }
                 }
@@ -885,23 +925,15 @@ struct VerificationView: View {
 
             Spacer()
 
-            // Далі пускаємо ЛИШЕ після того, як база записала Verified ID.
-            // Інакше на наступному вході застосунок знову просив би
-            // верифікацію — саме про це писали тестувальники.
+            // Статус Verified ID уже записаний у базу на кроці звірки
+            // обличчя (fail-closed: без підтвердження сервера екран успіху
+            // взагалі не показується). Тут — лише перехід до профілю.
             Button {
-                Task { @MainActor in
-                    isSavingStatus = true
-                    let saved = await CurrentSession.shared.markVerified()
-                    isSavingStatus = false
-                    if saved { screen = .profileSetup }
-                }
+                screen = .profileSetup
             } label: {
-                VerifyCoralButtonLabel(
-                    title: isSavingStatus ? trs("Зберігаємо статус…") : trs("Продовжити")
-                )
+                VerifyCoralButtonLabel(title: trs("Продовжити"))
             }
             .buttonStyle(.plain)
-            .disabled(isSavingStatus)
 
             if let error = session.verifySyncError {
                 Text(error)

@@ -12,8 +12,9 @@ struct PassportMRZ: Equatable {
 
     var isValid: Bool {
         normalizedDocumentNumber.isEmpty == false &&
-        isValidDate(dateOfBirth) &&
-        isValidDate(dateOfExpiry)
+        isValidCalendarDate(dateOfBirth) &&
+        isValidCalendarDate(dateOfExpiry) &&
+        isNotExpired(dateOfExpiry)
     }
 
     /// Пропускаем только документы України:
@@ -38,15 +39,53 @@ struct PassportMRZ: Equatable {
             .replacingOccurrences(of: "<", with: "")
     }
 
-    private func isValidDate(_ value: String) -> Bool {
+    /// РЕАЛЬНА перевірка календарної дати через Calendar: 31 лютого,
+    /// 30 лютого, 31 квітня тощо відхиляються (раніше приймалось будь-що
+    /// з mm 1–12, dd 1–31).
+    private func isValidCalendarDate(_ value: String) -> Bool {
+        Self.date(fromYYMMDD: value) != nil
+    }
+
+    /// Документ не має бути простроченим на момент перевірки.
+    private func isNotExpired(_ expiry: String) -> Bool {
+        guard let date = Self.date(fromYYMMDD: expiry, isExpiry: true) else { return false }
+        return date >= Calendar(identifier: .gregorian).startOfDay(for: Date())
+    }
+
+    /// YYMMDD → Date з суворою валідацією (без «переповнення» на наступний
+    /// місяць). Для терміну дії 2-значний рік трактуємо як 20YY.
+    static func date(fromYYMMDD value: String, isExpiry: Bool = false) -> Date? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count == 6, trimmed.allSatisfy(\.isNumber) else {
-            return false
+        guard trimmed.count == 6, trimmed.allSatisfy(\.isNumber),
+              let yy = Int(trimmed.prefix(2)),
+              let mm = Int(trimmed.dropFirst(2).prefix(2)),
+              let dd = Int(trimmed.dropFirst(4)) else { return nil }
+
+        // Рік: термін дії — завжди 20YY; дата народження — 19YY/20YY
+        // (майбутнє неможливе → якщо 20YY у майбутньому, це 19YY).
+        var year = 2000 + yy
+        if isExpiry == false, year > Calendar.current.component(.year, from: Date()) {
+            year -= 100
         }
 
-        let mm = Int(trimmed.dropFirst(2).prefix(2)) ?? 0
-        let dd = Int(trimmed.dropFirst(4)) ?? 0
-        return (1...12).contains(mm) && (1...31).contains(dd)
+        var components = DateComponents()
+        components.year = year
+        components.month = mm
+        components.day = dd
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        // isValidDate вимагає, щоб компоненти існували в календарі
+        // (31 лютого не існує — поверне false).
+        guard calendar.date(from: components) != nil,
+              calendar.date(components, matchesComponents: DateComponents(year: year, month: mm, day: dd)) != false
+        else { return nil }
+
+        // Додаткова строга перевірка: збираємо дату й розбираємо назад
+        guard let date = calendar.date(from: components) else { return nil }
+        let back = calendar.dateComponents([.year, .month, .day], from: date)
+        guard back.year == year, back.month == mm, back.day == dd else { return nil }
+        return date
     }
 
     /// MRZ-ключ для BAC/PACE (NFCPassportReader):
@@ -107,7 +146,9 @@ struct PassportMRZ: Equatable {
             .uppercased()
             .replacingOccurrences(of: " ", with: "")
 
-        guard line.count >= 28 else {
+        // TD3 — рівно 44 символи. Раніше приймалось >= 28: обрізаний
+        // рядок проходив, композитна чек-цифра не перевірялась зовсім.
+        guard line.count == 44 else {
             return nil
         }
 
@@ -120,11 +161,20 @@ struct PassportMRZ: Equatable {
         let birthCheck = chars[19]
         let expiry = String(chars[21..<27])
         let expiryCheck = chars[27]
+        let compositeCheck = chars[43]
+
+        // Композитна чек-цифра TD3: над номером+чек, датою нар.+чек,
+        // терміном+чек і персональним номером(28–42)+чек(42).
+        let composite = docNumberRaw + String(docCheck)
+            + birth + String(birthCheck)
+            + expiry + String(expiryCheck)
+            + String(chars[28..<43])
 
         guard
             verifyCheckDigit(docNumberRaw, expected: docCheck),
             verifyCheckDigit(birth, expected: birthCheck),
-            verifyCheckDigit(expiry, expected: expiryCheck)
+            verifyCheckDigit(expiry, expected: expiryCheck),
+            verifyCheckDigit(composite, expected: compositeCheck)
         else {
             return nil
         }

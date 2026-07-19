@@ -176,6 +176,14 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         }
     }
 
+    /// Скидання прогресу, коли обличчя загубилось / вийшло з умов.
+    /// Гарантує ПОСЛІДОВНІСТЬ 12 кадрів, а не суму рваних.
+    private func resetLivenessProgress() {
+        guard detectedFrameCount > 0 else { return }
+        detectedFrameCount = 0
+        DispatchQueue.main.async { self.faceConfidence = 0 }
+    }
+
     private func handleFaceDetected(pixelBuffer: CVPixelBuffer?) {
         detectedFrameCount += 1
 
@@ -268,6 +276,10 @@ extension FaceLivenessManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     /// правильной дистанции и лице по центру кадра.
     private func evaluate(face: VNFaceObservation?, pixelBuffer: CVPixelBuffer, brightness: Double?) {
         guard let face else {
+            // Обличчя зникло → прогрес liveness ОБНУЛЯЄТЬСЯ: кадри мають
+            // бути ПОСЛІДОВНИМИ. Раніше лічильник не скидався — можна було
+            // «набрати» 12 кадрів рваними шматками з різних облич/фото.
+            resetLivenessProgress()
             setGuidance("Тримай обличчя в кадрі")
             handleTimeoutIfNeeded()
             return
@@ -275,6 +287,7 @@ extension FaceLivenessManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         // Мало света (EXIF BrightnessValue: < -1 — темно)
         if let brightness, brightness < -1 {
+            resetLivenessProgress()
             setGuidance("Потрібно більше світла")
             return
         }
@@ -283,10 +296,12 @@ extension FaceLivenessManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         // Слишком далеко / слишком близко
         if box.width < 0.22 {
+            resetLivenessProgress()
             setGuidance("Наблизь обличчя до камери")
             return
         }
         if box.width > 0.75 {
+            resetLivenessProgress()
             setGuidance("Трохи відсунься від камери")
             return
         }
@@ -295,6 +310,7 @@ extension FaceLivenessManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         let dx = abs(box.midX - 0.5)
         let dy = abs(box.midY - 0.5)
         if dx > 0.2 || dy > 0.22 {
+            resetLivenessProgress()
             setGuidance("Розташуй обличчя по центру кола")
             return
         }

@@ -9,6 +9,13 @@ enum FaceMatchVerdict {
     case noMatch(similarity: Double)     // другое лицо
 }
 
+/// Вердикт + яка модель фактично рахувала — щоб чесно повідомити
+/// серверу (evidence.faceModel) і не приховувати зниження гарантій.
+struct FaceMatchResultDetail {
+    let verdict: FaceMatchVerdict
+    let model: String   // "coreml" | "vision_fallback"
+}
+
 /// Сверка лица с камеры с фото владельца из чипа документа (DG2).
 ///
 /// Пайплайн: детекция лица → выравнивание по линии глаз → кадрирование →
@@ -26,16 +33,26 @@ enum FaceMatcher {
     private static let printMatch: Float = 0.85
     private static let printUncertain: Float = 1.05
 
-    static func match(chipPhoto: UIImage, liveFace: UIImage) async throws -> FaceMatchVerdict {
+    static func match(chipPhoto: UIImage, liveFace: UIImage) async throws -> FaceMatchResultDetail {
         try await Task.detached(priority: .userInitiated) {
             let chipCrop = try alignedFace(from: chipPhoto)
             let liveCrop = try alignedFace(from: liveFace)
 
             if FaceEmbedder.shared.isAvailable {
-                return try matchWithEmbeddings(chipCrop, liveCrop)
-            } else {
-                return try matchWithFeaturePrints(chipCrop, liveCrop)
+                let verdict = try matchWithEmbeddings(chipCrop, liveCrop)
+                return FaceMatchResultDetail(verdict: verdict, model: "coreml")
             }
+
+            // РЕЛІЗ: тихий fallback на VNFeaturePrint заборонено — це
+            // знизило б гарантії без відома сервера й користувача.
+            // Vision FeaturePrint — інструмент подібності зображень,
+            // а не біометричне підтвердження особи.
+            #if DEBUG
+            let verdict = try matchWithFeaturePrints(chipCrop, liveCrop)
+            return FaceMatchResultDetail(verdict: verdict, model: "vision_fallback")
+            #else
+            throw FaceMatchError.modelUnavailable
+            #endif
         }.value
     }
 
@@ -196,6 +213,7 @@ enum FaceMatchError: LocalizedError {
     case invalidImage
     case faceNotFound
     case featurePrintFailed
+    case modelUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -205,6 +223,8 @@ enum FaceMatchError: LocalizedError {
             return trs("Обличчя не знайдено на зображенні.")
         case .featurePrintFailed:
             return trs("Не вдалося побудувати відбиток обличчя.")
+        case .modelUnavailable:
+            return trs("Модель звірки обличчя недоступна. Верифікацію не можна пройти на цьому пристрої.")
         }
     }
 }
