@@ -17,7 +17,10 @@ const path   = require('path');
 
 const TEAM_ID    = process.env.APPLE_TEAM_ID  || '';
 const BUNDLE_ID  = process.env.APP_BUNDLE_ID  || '';
-const ATT_ENV    = process.env.APPATTEST_ENV  || 'production';
+// FAIL-CLOSED (аудит P1-08): будь-яке значення, крім явного
+// 'development', трактується як 'production' — одрук у конфігу
+// не відкриває приймання dev-атестацій.
+const ATT_ENV    = process.env.APPATTEST_ENV === 'development' ? 'development' : 'production';
 const APP_ID     = `${TEAM_ID}.${BUNDLE_ID}`;
 
 // правильна назва — Attestation; стару лишаємо як fallback
@@ -58,12 +61,14 @@ setInterval(() => {
 }, 60 * 1000).unref();
 
 function issueChallenge(contributorId) {
-  // Ліміт на акаунт: новий челендж витісняє найстаріші свої ж
-  let mine = 0;
+  // Ліміт на акаунт: витісняємо НАЙСТАРІШІ свої (аудит P1-06 —
+  // попередня версія помилково видаляла найновіші).
+  const mine = [];
   for (const [id, c] of challenges) {
-    if (c.contributorId !== contributorId) continue;
-    mine++;
-    if (mine >= MAX_PER_CONTRIBUTOR) challenges.delete(id);
+    if (c.contributorId === contributorId) mine.push(id); // Map = порядок вставки
+  }
+  while (mine.length >= MAX_PER_CONTRIBUTOR) {
+    challenges.delete(mine.shift());
   }
   // Глобальний ліміт: fail-closed, а не безмежне зростання памʼяті
   if (challenges.size >= MAX_CHALLENGES) {
@@ -81,9 +86,11 @@ function issueChallenge(contributorId) {
 function consumeChallenge(id, contributorId) {
   const c = challenges.get(id);
   if (!c) return null;
-  challenges.delete(id);                        // одноразовий, навіть якщо перевірка впаде
-  if (Date.now() > c.expiresAt) return null;
+  // ВЛАСНИК перевіряється ДО видалення (аудит P1-06): чужий запит
+  // не «спалює» челендж легітимного власника.
   if (c.contributorId !== contributorId) return null;
+  challenges.delete(id);                        // одноразовий для власника
+  if (Date.now() > c.expiresAt) return null;
   return c.bytes;
 }
 

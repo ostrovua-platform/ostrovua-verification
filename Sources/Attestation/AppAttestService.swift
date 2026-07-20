@@ -109,7 +109,12 @@ enum AppAttestService {
                 canonicalPayload: String(decoding: canonical, as: UTF8.self)
             )
         } catch {
-            // Ключ протух — перереєстровуємо і будуємо payload заново
+            // Перереєстрація ЛИШЕ коли ключ СПРАВДІ невалідний (стертий
+            // системою/пошкоджений). Транзієнтні збої НЕ знищують ключ:
+            // раніше будь-яка помилка = видалення ключа + повна
+            // re-attestation (churn і гонки, аудит P2-02).
+            guard (error as? DCError)?.code == .invalidKey else { throw error }
+
             storedKeyId = nil
             let freshKeyId = try await registerNewKey(service: service)
             let (newChallengeId, newChallenge) = try await requestChallenge()

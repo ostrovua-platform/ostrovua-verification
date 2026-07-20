@@ -61,6 +61,29 @@ if [ -z "$ML" ] || [ ! -f "$ML" ]; then
 fi
 
 echo "→ Masterlist: $ML"
+
+# ── Захист від ВІДКАТУ (аудит P1-11): signingTime нового masterlist
+# не може бути старішим за вже застосований. Стан — ml_state.txt
+# (генерується на сервері, виключений з rsync).
+ML_TIME_RAW=$(openssl cms -inform DER -in "$ML" -cmsout -print 2>/dev/null \
+  | grep -A2 'signingTime' | grep -m1 'UTCTIME\|GENERALIZEDTIME' \
+  | sed 's/.*TIME://')
+if [ -n "$ML_TIME_RAW" ]; then
+  ML_EPOCH=$(date -d "$ML_TIME_RAW" +%s 2>/dev/null || echo "")
+  if [ -n "$ML_EPOCH" ] && [ -f ml_state.txt ]; then
+    PREV_EPOCH=$(head -1 ml_state.txt)
+    if [ "$ML_EPOCH" -lt "$PREV_EPOCH" ] && [ "${FORCE_ML:-0}" != "1" ]; then
+      echo "✗ ВІДКАТ: цей masterlist ($ML_TIME_RAW) старіший за застосований"
+      echo "  ($(date -d @"$PREV_EPOCH" 2>/dev/null || echo "$PREV_EPOCH"))."
+      echo "  Свідомо прийняти старіший: FORCE_ML=1. Інакше — СТОП."
+      exit 1
+    fi
+  fi
+  echo "→ Підписано: $ML_TIME_RAW"
+else
+  echo "⚠ Не зміг прочитати signingTime — захист від відкату пропущено."
+fi
+
 rm -rf certs content.der ml_signer.pem
 mkdir -p certs
 
@@ -69,10 +92,19 @@ fingerprint() {
     | sed 's/^.*=//' | tr -d ':' | tr 'A-F' 'a-f'
 }
 
-# 1. Вміст + хто підписав сам masterlist (для контролю очима)
-openssl cms -verify -noverify -inform DER -in "$ML" -out content.der \
-  -signer ml_signer.pem 2>/dev/null \
-  || openssl cms -verify -noverify -inform DER -in "$ML" -out content.der
+# 1. Вміст + підписант. БЕЗ fallback (аудит P1-03): раніше друга
+# спроба без -signer могла лишити ml_signer.pem відсутнім і ТИХО
+# пропустити перевірку піна підписанта. Тепер: не витягли підписанта —
+# СТОП, жодного шляху повз пін.
+if ! openssl cms -verify -noverify -inform DER -in "$ML" -out content.der \
+     -signer ml_signer.pem 2>/dev/null; then
+  echo "✗ Не вдалося перевірити CMS-підпис / витягти підписанта masterlist. СТОП."
+  exit 1
+fi
+if [ ! -f ml_signer.pem ]; then
+  echo "✗ Підписанта не витягнуто — перевірка піна неможлива. СТОП."
+  exit 1
+fi
 if [ -f ml_signer.pem ]; then
   echo "→ Masterlist підписано:"
   openssl x509 -in ml_signer.pem -noout -subject -issuer | sed 's/^/    /'
@@ -115,8 +147,11 @@ python3 extract_certs.py content.der certs
 #    коренем довіри мовчки. Новий легітимний UA CSCA додається так:
 #    звір відбиток за ДРУГИМ незалежним джерелом (ICAO PKD, npkd.nl),
 #    допиши рядок у pins_ua.txt, задеплой.
-: > csca_ua.pem
-: > csca_all.pem
+# Збірка у тимчасові файли; РОБОЧИЙ csca_ua.pem підміняється атомарно
+# (mv) лише наприкінці (аудит P1-02): auth ніколи не читає недописаний
+# або порожній trust bundle.
+: > csca_ua.pem.new
+: > csca_all.pem.new
 : > pins_ua.generated.txt
 UA=0; ALL=0; SKIPPED=0
 HAVE_PINS=0
@@ -124,18 +159,24 @@ HAVE_PINS=0
 
 # FAIL-CLOSED BOOTSTRAP: без pins_ua.txt довіру НЕ будуємо. TOFU
 # (перший запуск з фіксацією нових пінів) — ЛИШЕ явним ALLOW_TOFU=1,
-# з подальшою звіркою за другим джерелом (crosscheck_icao.sh).
-# Інакше «перший запуск» міг би мовчки прийняти будь-який C=UA.
-if [ "$HAVE_PINS" = "0" ] && [ "${ALLOW_TOFU:-0}" != "1" ]; then
-  echo "✗ pins_ua.txt відсутній. Довіра без пінів НЕ встановлюється."
-  echo "  Свідомий перший запуск: ALLOW_TOFU=1 bash auth/csca/fetch_masterlist.sh"
-  echo "  Потім: звір відбитки за другим джерелом і зафіксуй pins_ua.txt у git."
-  exit 1
+# і ЛИШЕ на ще не ініціалізованій системі (аудит P1-01: на робочому
+# проді TOFU не спрацює навіть з прапорцем — це не escape hatch).
+if [ "$HAVE_PINS" = "0" ]; then
+  if [ "${ALLOW_TOFU:-0}" != "1" ]; then
+    echo "✗ pins_ua.txt відсутній. Довіра без пінів НЕ встановлюється."
+    echo "  Свідомий ПЕРШИЙ запуск нової системи: ALLOW_TOFU=1 bash auth/csca/fetch_masterlist.sh"
+    echo "  Потім: звір відбитки за другим джерелом і зафіксуй pins_ua.txt у git."
+    exit 1
+  fi
+  if [ -f ml_state.txt ] || [ -f csca_ua.pem ]; then
+    echo "✗ Система вже ініціалізована — TOFU заборонено. Поверни pins_ua.txt з git."
+    exit 1
+  fi
 fi
 
 for pem in certs/cert_*.pem; do
   SUBJ=$(openssl x509 -in "$pem" -noout -subject 2>/dev/null || echo "")
-  cat "$pem" >> csca_all.pem; ALL=$((ALL+1))
+  cat "$pem" >> csca_all.pem.new; ALL=$((ALL+1))
   if echo "$SUBJ" | grep -Eq 'C ?= ?UA(,|/|$| )'; then
     FP=$(fingerprint "$pem")
     echo "$FP  # $SUBJ" >> pins_ua.generated.txt
@@ -146,7 +187,7 @@ for pem in certs/cert_*.pem; do
       echo "      відбиток: $FP"
       continue
     fi
-    cat "$pem" >> csca_ua.pem; UA=$((UA+1))
+    cat "$pem" >> csca_ua.pem.new; UA=$((UA+1))
     echo "  UA: $SUBJ"
     openssl x509 -in "$pem" -noout -dates | sed 's/^/      /'
     echo "      sha256: $FP"
@@ -166,6 +207,18 @@ fi
 if [ "$UA" -eq 0 ]; then
   echo "✗ Жодного довіреного українського CSCA — PA не запрацює."
   [ "$SKIPPED" -gt 0 ] && echo "  Усі UA-сертифікати відсіяні пінами. Перевір pins_ua.txt!"
+  rm -f csca_ua.pem.new csca_all.pem.new
   exit 1
 fi
+
+# АТОМАРНА ПІДМІНА (mv у межах однієї ФС — атомарний rename):
+# робочий trust bundle або старий цілий, або новий цілий — ніколи
+# не порожній і не недописаний.
+mv csca_ua.pem.new csca_ua.pem
+mv csca_all.pem.new csca_all.pem
 echo "✓ csca_ua.pem готовий (монтується в auth як /app/csca/csca_ua.pem)."
+
+# Фіксуємо застосовану версію (для захисту від відкату наступного разу)
+if [ -n "${ML_EPOCH:-}" ]; then
+  printf "%s\n# applied %s (%s)\n" "$ML_EPOCH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ML_TIME_RAW" > ml_state.txt
+fi

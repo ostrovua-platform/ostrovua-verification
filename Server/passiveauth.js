@@ -251,6 +251,14 @@ async function verifySOD({ sodBase64, dgHashes }) {
     try {
       const args = ['verify', '-CAfile', MASTERLIST];
       if (NO_CHECK_TIME) args.push('-no_check_time');
+      // CRL (revocation): механізм готовий — щойно зʼявиться файл CRL
+      // від офіційного фіда (ICAO PKD / державний DP), перевірка
+      // відкликаних DSC вмикається автоматично. Без файла — ланцюжок
+      // без revocation (чесно задокументовано, threat-model P1-04).
+      const CRL_FILE = process.env.CSCA_CRL || '/app/csca/csca_ua.crl.pem';
+      if (fs.existsSync(CRL_FILE)) {
+        args.push('-crl_check', '-CRLfile', CRL_FILE);
+      }
       args.push('-untrusted', certsPath, signerPath);
       await openssl(args);
     } catch {
