@@ -223,6 +223,20 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
 
                 self.session.commitConfiguration()
 
+                // ПОЛІТИКА (рішення після аудитів): Verified ID видається
+                // ЛИШЕ з перевіркою обʼємності. Без TrueDepth (SE, до
+                // iPhone X) верифікація чесно недоступна — ніякого
+                // «тихого» зниження рівня до евристики.
+                guard depthReady else {
+                    DispatchQueue.main.async {
+                        self.result = .failed(
+                            "Для верифікації потрібен iPhone з Face ID (TrueDepth). Пристрої без нього наразі не підтримуються. (E-406)"
+                        )
+                        self.complete(success: false)
+                    }
+                    return
+                }
+
                 self.detectedFrameCount = 0
                 self.startedAt = Date()
 
