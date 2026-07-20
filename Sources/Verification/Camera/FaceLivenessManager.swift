@@ -22,7 +22,10 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
     let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let depthOutput = AVCaptureDepthDataOutput()
+    private var synchronizer: AVCaptureDataOutputSynchronizer?
     private let queue = DispatchQueue(label: "ostrovua.face.liveness.queue")
+    // (глибина тепер приходить синхронно з відео через synchronizer —
+    //  окремого latestDepth більше немає, аудит #1)
 
     private var completion: ((Bool) -> Void)?
     private var detectedFrameCount = 0
@@ -32,7 +35,6 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
     /// зобовʼязаний пройти перевірку ОБʼЄМНОСТІ обличчя (анти-фото).
     private var depthSupported = false
     /// Остання мапа глибини (пишеться і читається на self.queue).
-    private var latestDepth: AVDepthData?
 
     /// Типізований доказ живої присутності (аудит F7): не рядок-прапорець,
     /// а `DepthLivenessProof`, який створюється ЛИШЕ тут після реальної
@@ -58,7 +60,7 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         detectedFrameCount = 0
         startedAt = nil
         completion = nil
-        queue.async { self.latestDepth = nil }
+        synchronizer = nil
     }
 
     func reset() {
@@ -160,7 +162,8 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
 
                 self.session.addInput(input)
 
-                self.videoOutput.setSampleBufferDelegate(self, queue: self.queue)
+                // Індивідуальний delegate НЕ ставимо — кадри доставляє
+                // AVCaptureDataOutputSynchronizer (RGB+depth разом, аудит #1).
                 self.videoOutput.alwaysDiscardsLateVideoFrames = true
 
                 guard self.session.canAddOutput(self.videoOutput) else {
@@ -213,7 +216,6 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
 
                             self.session.addOutput(self.depthOutput)
                             self.depthOutput.isFilteringEnabled = true
-                            self.depthOutput.setDelegate(self, callbackQueue: self.queue)
                             depthReady = true
                         } catch {
                             self.session.sessionPreset = .medium
@@ -222,9 +224,18 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
                     }
                 }
                 self.depthSupported = depthReady
-                self.latestDepth = nil
 
                 self.session.commitConfiguration()
+
+                // Синхронна доставка RGB+depth ОДНІЄЮ парою (аудит #1):
+                // Vision-детекція і мапа глибини гарантовано з одного
+                // моменту часу, не «остання, яка прилетіла».
+                if depthReady {
+                    let sync = AVCaptureDataOutputSynchronizer(
+                        dataOutputs: [self.videoOutput, self.depthOutput])
+                    sync.setDelegate(self, queue: self.queue)
+                    self.synchronizer = sync
+                }
 
                 // ПОЛІТИКА (рішення після аудитів): Verified ID видається
                 // ЛИШЕ з перевіркою обʼємності. Без TrueDepth (SE, до
@@ -265,14 +276,13 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         DispatchQueue.main.async { self.faceConfidence = 0 }
     }
 
-    private func handleFaceDetected(pixelBuffer: CVPixelBuffer?, faceBox: CGRect) {
+    private func handleFaceDetected(pixelBuffer: CVPixelBuffer?, depth: AVDepthData?, faceBox: CGRect) {
         // ── Ворота глибини (TrueDepth) ────────────────────────────────
         // Кадр зараховується ЛИШЕ якщо мапа глибини показує рельєф
-        // обличчя. Плоске фото/екран (навіть нахилене — площину-фіт
-        // нахил не обманює) кадрів не набере → таймаут. Кадр без
-        // свіжої глибини просто не зараховується (без скидання).
+        // ОБЛИЧЧЯ (вибірка глибини — у ROI детектованого обличчя, аудит #2).
+        // depth синхронний із цим RGB-кадром (аудит #1).
         if depthSupported {
-            guard let depth = latestDepth else { return }
+            guard let depth else { return }
             let rms = Self.depthRMS(depth, faceBox: faceBox)
             #if DEBUG
             PADLogger.shared.record(rms: rms)   // збір для оцінки APCER/BPCER
@@ -332,10 +342,17 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         return rms >= depthRMSThreshold && rms <= depthRMSUpperBound
     }
 
-    /// Least-squares площина по центральному вікну кадру глибини +
-    /// RMS-залишок (метри) або nil, якщо валідних точок замало.
-    /// Винесено окремо, щоб той самий вимір йшов і в gate, і в
-    /// PAD-лог (Tools/PADScore) для оцінки APCER/BPCER.
+    /// Least-squares площина по вікну глибини у ROI ОБЛИЧЧЯ + RMS-залишок
+    /// (метри) або nil, якщо валідних точок замало (аудит #2).
+    ///
+    /// ROI: `faceBox` (нормалізований, простір Vision .leftMirrored,
+    /// origin знизу-зліва) мапиться в піксельні координати мапи глибини.
+    /// Для фронтальної TrueDepth у портреті .leftMirrored осі RGB↔depth
+    /// поміняні (поворот 90°): oriented-x → native-y, oriented-y → native-x.
+    /// FAIL-SAFE: якщо мапінг дасть замало валідних точок — повертаємо nil
+    /// (кадр НЕ зараховується). Тобто помилка мапінгу = відмова (безпечно),
+    /// а не хибний прохід. Підтвердження мапінгу — повторним PAD-прогоном
+    /// (bonafide BPCER має лишатись 0).
     static func depthRMS(_ depthData: AVDepthData, faceBox: CGRect) -> Double? {
         let depth32: AVDepthData
         if depthData.depthDataType == kCVPixelFormatType_DepthFloat32 {
@@ -353,12 +370,19 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         let height = CVPixelBufferGetHeight(map)
         let rowBytes = CVPixelBufferGetBytesPerRow(map)
 
-        // Вікно: центр кадру, сторона ~ розміру обличчя (обличчя і так
-        // з-gate-но по центру й розміру перед цим викликом).
+        // Центр обличчя з Vision-простору → native-піксель мапи глибини
+        // (осі поміняні через .leftMirrored). Беремо ЯДРО обличчя (ніс/
+        // щоки), уникаючи країв/волосся/фону — саме там чистий рельєф.
+        let cxNorm = faceBox.midY                    // oriented-y → native-x
+        let cyNorm = faceBox.midX                    // oriented-x → native-y
+        let cx = Int((cxNorm * CGFloat(width)).rounded())
+        let cy = Int((cyNorm * CGFloat(height)).rounded())
+
         let minDim = CGFloat(min(width, height))
-        let side = Int(max(0.18, min(0.5, min(faceBox.width, faceBox.height) * 0.7)) * minDim)
-        let x0 = (width - side) / 2
-        let y0 = (height - side) / 2
+        // Ядро ~0.45 меншої сторони обличчя (тісніше, ніж усе обличчя).
+        let side = Int(max(0.14, min(0.42, min(faceBox.width, faceBox.height) * 0.45)) * minDim)
+        let x0 = max(0, min(width - side, cx - side / 2))
+        let y0 = max(0, min(height - side, cy - side / 2))
 
         // Сітка 20×20: точки (x, y, z)
         var xs: [Double] = [], ys: [Double] = [], zs: [Double] = []
@@ -433,35 +457,31 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
     }
 }
 
-extension FaceLivenessManager: AVCaptureDepthDataOutputDelegate {
-    func depthDataOutput(
-        _ output: AVCaptureDepthDataOutput,
-        didOutput depthData: AVDepthData,
-        timestamp: CMTime,
-        connection: AVCaptureConnection
+extension FaceLivenessManager: AVCaptureDataOutputSynchronizerDelegate {
+    func dataOutputSynchronizer(
+        _ synchronizer: AVCaptureDataOutputSynchronizer,
+        didOutput collection: AVCaptureSynchronizedDataCollection
     ) {
-        // Той самий queue, що й відео — гонок немає
-        latestDepth = depthData
-    }
-}
-
-extension FaceLivenessManager: AVCaptureVideoDataOutputSampleBufferDelegate {
-    func captureOutput(
-        _ output: AVCaptureOutput,
-        didOutput sampleBuffer: CMSampleBuffer,
-        from connection: AVCaptureConnection
-    ) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+        // RGB і depth — з ОДНОГО моменту (аудит #1). Якщо depth-кадр
+        // пропущено (dropped), не зараховуємо кадр.
+        guard let videoData = collection.synchronizedData(for: videoOutput)
+                as? AVCaptureSynchronizedSampleBufferData,
+              videoData.sampleBufferWasDropped == false,
+              let pixelBuffer = CMSampleBufferGetImageBuffer(videoData.sampleBuffer) else {
             return
         }
+        let depthData = (collection.synchronizedData(for: depthOutput)
+            as? AVCaptureSynchronizedDepthData).flatMap {
+                $0.depthDataWasDropped ? nil : $0.depthData
+            }
 
-        let brightness = Self.brightness(of: sampleBuffer)
+        let brightness = Self.brightness(of: videoData.sampleBuffer)
 
         let request = VNDetectFaceRectanglesRequest { [weak self] request, _ in
             guard let self else { return }
-
             let faces = request.results as? [VNFaceObservation] ?? []
-            self.evaluate(face: faces.first, pixelBuffer: pixelBuffer, brightness: brightness)
+            self.evaluate(face: faces.first, pixelBuffer: pixelBuffer,
+                          depth: depthData, brightness: brightness)
         }
 
         let handler = VNImageRequestHandler(
@@ -479,7 +499,8 @@ extension FaceLivenessManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
     /// Face ID-стиль: прогресс идёт только при хорошем свете,
     /// правильной дистанции и лице по центру кадра.
-    private func evaluate(face: VNFaceObservation?, pixelBuffer: CVPixelBuffer, brightness: Double?) {
+    private func evaluate(face: VNFaceObservation?, pixelBuffer: CVPixelBuffer,
+                          depth: AVDepthData?, brightness: Double?) {
         guard let face else {
             // Обличчя зникло → прогрес liveness ОБНУЛЯЄТЬСЯ: кадри мають
             // бути ПОСЛІДОВНИМИ. Раніше лічильник не скидався — можна було
@@ -522,7 +543,7 @@ extension FaceLivenessManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         // Всё хорошо — прогресс идёт
         setGuidance(nil)
-        handleFaceDetected(pixelBuffer: pixelBuffer, faceBox: box)
+        handleFaceDetected(pixelBuffer: pixelBuffer, depth: depth, faceBox: box)
     }
 
     private func setGuidance(_ text: String?) {

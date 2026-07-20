@@ -1,70 +1,102 @@
 #!/usr/bin/env python3
 # ═══════════════════════════════════════════════════════════════════
-#  PAD-скоринг (аудит #8): рахує APCER / BPCER із зібраного pad_log.csv.
+#  PAD-скоринг (аудит #8). Рахує APCER / BPCER із pad_log.csv на ДВОХ
+#  рівнях і СМУГОЮ, що ТОЧНО відповідає бойовому gate:
+#     кадр «живий» ⇔ lower ≤ RMS ≤ upper   (за замовч. 5..20 мм)
 #
-#  Вхід: CSV з застосунку (DEBUG PADLogger) — колонки timestamp,label,rms_m.
-#   label: bonafide (жива особа) або тип атаки (print/screen/mask/other).
-#   rms_m: виміряний RMS-залишок глибини (метри); nil — кадр без валідної глибини.
-#
-#  Поріг рішення застосунку: RMS ≥ 0.005 м → кадр «живий».
-#
-#  Метрики (ISO/IEC 30107-3, наближення на рівні кадрів):
-#   APCER (на клас атаки) = частка кадрів атаки, що ПРОЙШЛИ поріг
-#     (сприйняті як живі) — чим менше, тим краще.
-#   BPCER = частка кадрів bonafide, що НЕ пройшли поріг
-#     (жива особа відхилена) — чим менше, тим краще.
+#  Рівні:
+#   • frame-level: частка окремих кадрів.
+#   • attempt-level: рішення попитки = 12 ПОСЛІДОВНИХ кадрів у смузі
+#     (як liveness). Попитки сегментуються за розривами часу
+#     (>2 c між кадрами = нова попитка).
 #
 #  Використання:
-#    python3 pad_score.py pad_log.csv [--threshold 0.005]
+#    python3 pad_score.py pad_log.csv [--lower 0.005] [--upper 0.020]
+#                                     [--consecutive 12] [--gap 2.0]
 # ═══════════════════════════════════════════════════════════════════
-import csv, sys, argparse
+import csv, argparse
 from collections import defaultdict
 
 ap = argparse.ArgumentParser()
 ap.add_argument("csv")
-ap.add_argument("--threshold", type=float, default=0.005)
+ap.add_argument("--lower", type=float, default=0.005)
+ap.add_argument("--upper", type=float, default=0.020)
+ap.add_argument("--consecutive", type=int, default=12)
+ap.add_argument("--gap", type=float, default=2.0, help="розрив часу (с) = нова попитка")
 a = ap.parse_args()
 
-frames = defaultdict(list)   # label -> [rms|None]
-with open(a.csv) as f:
-    for row in csv.DictReader(f):
-        v = row["rms_m"].strip()
-        frames[row["label"]].append(None if v == "nil" else float(v))
+rows = defaultdict(list)   # label -> [(ts, rms|None)]
+for r in csv.DictReader(open(a.csv)):
+    v = r["rms_m"].strip()
+    rows[r["label"]].append((float(r["timestamp"]), None if v == "nil" else float(v)))
 
-def passed(vals, t):   # кадр «живий», якщо RMS є і ≥ поріг
-    return sum(1 for v in vals if v is not None and v >= t)
+def in_band(rms):
+    return rms is not None and a.lower <= rms <= a.upper
 
-t = a.threshold
-print(f"Поріг рішення: RMS ≥ {t} м\n")
+def frame_pass_rate(seq):
+    return sum(1 for _, rms in seq if in_band(rms)) / len(seq) if seq else 0.0
 
-bona = frames.get("bonafide", [])
+def attempts(seq):
+    """Сегментує кадри в попитки за розривом часу; повертає список попиток,
+    кожна — список (ts,rms). Кадри всередині попитки впорядковані."""
+    seq = sorted(seq)
+    out, cur, last = [], [], None
+    for ts, rms in seq:
+        if last is not None and ts - last > a.gap:
+            if cur: out.append(cur)
+            cur = []
+        cur.append((ts, rms)); last = ts
+    if cur: out.append(cur)
+    return out
+
+def attempt_passes(att):
+    """Попитка «жива» ⇔ є ≥ consecutive підряд кадрів у смузі."""
+    run = 0
+    for _, rms in att:
+        run = run + 1 if in_band(rms) else 0
+        if run >= a.consecutive:
+            return True
+    return False
+
+print(f"Смуга (як у проді): {a.lower*1000:.0f}–{a.upper*1000:.0f} мм; "
+      f"попитка = {a.consecutive} послідовних кадрів; розрив попиток > {a.gap} c\n")
+
+bona = rows.get("bonafide", [])
+attack_labels = [k for k in rows if k != "bonafide"]
+
+# BONAFIDE
 if bona:
-    live = passed(bona, t)
-    bpcer = 1 - live / len(bona)
-    print(f"BONAFIDE: кадрів {len(bona)}, пройшли {live}")
-    print(f"  BPCER = {bpcer:.4f}  (жива особа відхилена — менше = краще)\n")
+    fr = 1 - frame_pass_rate(bona)
+    atts = attempts(bona)
+    at = 1 - (sum(attempt_passes(x) for x in atts) / len(atts) if atts else 0)
+    print(f"BONAFIDE: кадрів {len(bona)}, попиток {len(atts)}")
+    print(f"  BPCER frame-level   = {fr:.4f}")
+    print(f"  BPCER attempt-level = {at:.4f}  (жива особа не пройшла попитку)\n")
 else:
-    print("⚠ Немає кадрів bonafide — зніми живу особу.\n")
+    print("⚠ Немає bonafide.\n")
 
-attack_labels = [k for k in frames if k != "bonafide"]
-worst = 0.0
+# ATTACKS
+worst_f = worst_a = 0.0
 for lbl in sorted(attack_labels):
-    vals = frames[lbl]
-    ap_ = passed(vals, t) / len(vals) if vals else 0.0
-    worst = max(worst, ap_)
-    print(f"ATTACK «{lbl}»: кадрів {len(vals)}, пройшли поріг {passed(vals, t)}")
-    print(f"  APCER = {ap_:.4f}  (атака пройшла як жива — менше = краще)")
+    seq = rows[lbl]
+    fr = frame_pass_rate(seq)
+    atts = attempts(seq)
+    ar = sum(attempt_passes(x) for x in atts) / len(atts) if atts else 0.0
+    worst_f = max(worst_f, fr); worst_a = max(worst_a, ar)
+    print(f"ATTACK «{lbl}»: кадрів {len(seq)}, попиток {len(atts)}")
+    print(f"  APCER frame-level   = {fr:.4f}")
+    print(f"  APCER attempt-level = {ar:.4f}  (атака пройшла попитку)\n")
 
 if attack_labels:
-    print(f"\nНайгірший APCER серед атак = {worst:.4f}")
-    print("Ціль high-assurance: APCER мінімальний при прийнятному BPCER;")
-    print("порогом можна рухати компроміс (свіп нижче).")
+    print(f"Найгірший APCER: frame {worst_f:.4f}, attempt {worst_a:.4f}")
 
-# Свіп порога для вибору компромісу
-print("\n— свіп порога —")
-print("thr_mm  BPCER   APCER_max")
-ts = [i / 1000 for i in range(2, 13)]   # 2..12 мм
-for tt in ts:
-    bp = (1 - passed(bona, tt) / len(bona)) if bona else float("nan")
-    am = max((passed(frames[l], tt) / len(frames[l])) for l in attack_labels) if attack_labels else float("nan")
-    print(f"{tt*1000:5.0f}   {bp:.3f}   {am:.3f}")
+# Свіп ВЕРХНЬОГО порога (нижній фіксований) — вибір компромісу
+print("\n— свіп верхнього порога (нижній = {:.0f} мм) —".format(a.lower*1000))
+print("upper_mm  BPCER_frame  APCER_frame_max")
+saved = a.upper
+for up in [i/1000 for i in range(12, 41, 2)]:
+    a.upper = up
+    bp = (1 - frame_pass_rate(bona)) if bona else float("nan")
+    am = max((frame_pass_rate(rows[l]) for l in attack_labels), default=float("nan"))
+    print(f"{up*1000:6.0f}    {bp:.3f}        {am:.3f}")
+a.upper = saved

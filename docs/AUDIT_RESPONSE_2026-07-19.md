@@ -366,3 +366,24 @@ release-blockers лишаються (виміряний PAD і FAR/FRR-валі�
 вимірювань; для бети за запрошеннями поточний рівень (держ-крипто PA +
 запінені CSCA + depth-gate + App Attest + атомарна дедуплікація +
 бан документів) є сильним і чесно描аним.
+
+## Update 8 — PAD-аудит (snapshot d0f730b), 11 вимог
+
+| # | Вимога | Статус |
+|---|--------|--------|
+| 1 | RGB/depth synchronization | **ЗРОБЛЕНО:** `AVCaptureDataOutputSynchronizer` — RGB і depth однією парою з одного моменту; окремий `latestDepth` прибрано (`FaceLivenessManager`). |
+| 2 | Actual face ROI mapping | **ЗРОБЛЕНО:** вибірка глибини — у ROI ядра обличчя (мапінг `faceBox`→depth з урахуванням .leftMirrored). Fail-safe: помилка мапінгу = nil = кадр не зараховано (безпечно). Потребує підтвердження повторним PAD-прогоном (bonafide BPCER=0). |
+| 3 | Per-attempt evaluation | **ЗРОБЛЕНО:** scorer рахує attempt-level (12 послідовних у смузі). На зібраних даних APCER attempt = 0 для print і screen. |
+| 4 | Незалежний holdout | **ЧАСТКОВО/план:** FAR/FRR — окремий split; PAD — потрібен другий незалежний збір. Калібрування і оцінку розводимо. |
+| 5 | Маски/3D | **RELEASE-BLOCKER:** реквізит потрібен фізично; протокол готовий, стенд збирає й маски (мітка `mask`). |
+| 6 | Більше bona-fide | **ПЛАН:** перший збір дав 12 кадрів (жива особа проходила швидко). Потрібен довший збір; стенд це дозволяє. |
+| 7 | Scorer lower+upper | **ЗРОБЛЕНО:** `pad_score.py` тепер моделює бойову смугу [5,20]мм (нижній+верхній), а не лише нижній. |
+| 8 | Raw anonymized dataset | **ЗРОБЛЕНО:** `Provenance/pad_dataset/pad_log_2026-07-20.csv` (лише RMS+мітки, без зображень/часу). Джерела логера/оверлея опубліковано. |
+| 9 | Реальний PG concurrency test | **ПІДТВЕРДЖЕНО ПРОГОНОМ:** `db/check_token_race.sh` проти ЖИВОГО Postgres, 30 паралельних зʼєднань → `ok=1, duplicate=29, token_owners=1, verified=1, ✓ PASS`. Плюс `Server/tests/race_document_token.integration.js` (pg). |
+| 10 | Одна транзакція token+assurance | **ЗРОБЛЕНО:** plpgsql `verify_bind_document()` — привʼязка токена Й `verified/assurance` в ОДНІЙ транзакції (SELECT…FOR UPDATE). |
+| 11 | FAR/FRR face model | **ЗРОБЛЕНО:** виміряно (AUC 0.987, EER 3.4%), поріг перекалібровано 0.60→0.50 — `Provenance/MODEL.md`. |
+
+**Підсумок:** усе, що закривається кодом/даними — закрито (1,2,3,7,8,9,10,11).
+Лишаються фізичні/датасетні: маски (#5), більший bona-fide збір (#6),
+незалежний holdout (#4) і підтверджувальний PAD-прогін для ROI-мапінгу (#2).
+Це випробувальні кроки, не код; ми їх не оголошуємо зробленими.
