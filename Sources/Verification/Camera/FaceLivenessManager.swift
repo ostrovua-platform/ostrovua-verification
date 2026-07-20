@@ -277,7 +277,11 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
             #if DEBUG
             PADLogger.shared.record(rms: rms)   // збір для оцінки APCER/BPCER
             #endif
-            guard let rms, rms >= Self.depthRMSThreshold else { return }
+            // Смуга живого обличчя: нижній поріг проти площини, верхній —
+            // проти розриву глибини (протікання фону/руки), аудит #8.
+            guard let rms,
+                  rms >= Self.depthRMSThreshold,
+                  rms <= Self.depthRMSUpperBound else { return }
         }
 
         detectedFrameCount += 1
@@ -312,13 +316,20 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
 
     // MARK: - Обʼємність обличчя за мапою глибини (анти-фото/екран)
 
-    /// Поріг обʼємності: RMS-залишок від площини (метри). Живе обличчя —
-    /// ніс/щоки дають кривизну ≥ 5 мм; плоске фото/екран — шум сенсора.
+    /// Смуга обʼємності живого обличчя (метри), КАЛІБРОВАНА виміряним
+    /// PAD-прогоном (Tools/PADScore, 2026-07-20):
+    ///  • нижній поріг 5 мм — плоске фото/екран (шум сенсора) не проходить;
+    ///  • ВЕРХНІЙ поріг 20 мм — розрив глибини (край паперу + фон/рука в
+    ///    вікні) відсікається. Без нього «протікання» сцени давало RMS до
+    ///    148 мм і хибно проходило як живе (print APCER 28.6% → 4.3%,
+    ///    screen 1% → 0%; BPCER лишається 0). Живе обличчя в вибірці —
+    ///    6–10 мм, у смузі.
     static let depthRMSThreshold: Double = 0.005
+    static let depthRMSUpperBound: Double = 0.020
 
     private static func isVolumetricFace(_ depthData: AVDepthData, faceBox: CGRect) -> Bool {
         guard let rms = depthRMS(depthData, faceBox: faceBox) else { return false }
-        return rms >= depthRMSThreshold
+        return rms >= depthRMSThreshold && rms <= depthRMSUpperBound
     }
 
     /// Least-squares площина по центральному вікну кадру глибини +

@@ -349,7 +349,7 @@ depth-backed strong.** Реалізовано наскрізно:
 | 5 | Фізично видалити dev bypass | **ВИДАЛЕНО:** `VERIFY_DEV_BYPASS` більше немає в коді атестації. Обійти неможливо. |
 | 6 | Play Integrity branch | **ВИДАЛЕНО:** «висяча» гілка прибрана; Android — окремий майбутній маршрут з nonce-binding. |
 | 7 | Синхронізація RGB/depth + ROI | **ЧАСТКОВО:** depth-gate працює; синхронізатор timestamp + мапінг faceBox→depth ROI — у плані PAD (`PAD_AND_BIOMETRIC_PLAN.md`). |
-| 8 | PAD attack evaluation | **RELEASE-BLOCKER, прийнято:** протокол ISO 30107-3 у `PAD_AND_BIOMETRIC_PLAN.md`. Фізичні випробування — не код. |
+| 8 | PAD attack evaluation | **ВИМІРЯНО (перший прогін):** print/screen фізично пред'явлені. Виявлено спуф центрального вікна (протікання фону, RMS до 148мм) → додано верхній поріг смуги [5,20]мм: print APCER 28.6%→4.3%, screen 1%→0%, BPCER 0. Числа — `Provenance/PAD_AND_BIOMETRIC_PLAN.md`. Лишається: маска, per-attempt метрика, ROI-mapping + challenge-response (повний ISO 30107-3). |
 | 9 | Face model + FAR/FRR | **ВИМІРЯНО:** `Tools/FaceEval` прогнано на LFW (6000 пар) — AUC 0.987, EER 3.4%. Поріг ПЕРЕКАЛІБРОВАНО 0.60→0.50 за виміряним ROC (FAR 0.13%, FRR 6.7%). Числа й обґрунтування — `Provenance/MODEL.md`. Лишається доменна оцінка на власному наборі селфі↔DG2. |
 | 10 | Публікація CurrentSession/server.js/schema | **ЗРОБЛЕНО:** `Sources/Session/CurrentSession.swift`, `Server/verify_approve.route.js` (реальний маршрут), `Server/DB_SCHEMA.sql` (таблиці+constraints). |
 | 11 | State machine + cancellation | **ДОДАНО:** транзакційний лічильник `verifyTxn` + `faceCheckTask.cancel()`; stale-результати ігноруються після await/уходу/скидання. |
