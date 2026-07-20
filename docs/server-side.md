@@ -35,10 +35,26 @@ if (pa.status !== 'passed') {
             .json({ error: 'Документ не пройшов криптографічну перевірку справжності' });
 }
 
+// 5. «Один документ = один акаунт» + бан документа (fail-closed):
+//    token = HMAC-SHA256(pepper, державний хеш DG1 із SOD).
+//    Жодного персонального поля; відновити дані з токена неможливо.
+const docToken = crypto.createHmac('sha256', DOC_PEPPER)
+  .update('doc-token-v1:' + pa.sodDG1Hash).digest('hex');
+
+const dt = await hasuraAdmin(/* byToken + byContributor lookup */);
+const existing = dt.byToken?.[0];
+if (existing?.status === 'banned')
+  return res.status(403).json({ error: 'Цей документ заблоковано за порушення правил спільноти.' });
+if (existing?.contributor_id && existing.contributor_id !== contributorId)
+  return res.status(409).json({ error: 'Цей документ уже використано для верифікації іншого акаунта.' });
+// … звільнення старого токена при зміні паспорта + upsert привʼязки
+// (повна логіка — у продакшн-обробнику; без робочої дедуплікації
+// Verified ID не видається — 503)
+
 const level = liveness === 'depth' ? 'strong' : 'standard';
 const storedMethod = method + '+pa' + (liveness === 'depth' ? '+depth' : '');
 
-// 5. Запис у базу: прапорець, дата, метод. SOD НЕ зберігається —
+// 6. Запис у базу: прапорець, дата, метод. SOD НЕ зберігається —
 //    тимчасова тека видаляється одразу після перевірки.
 await hasuraAdmin(
   `mutation($id: uuid!, $m: String!, $at: timestamptz!) {
@@ -48,8 +64,7 @@ await hasuraAdmin(
   { id: contributorId, m: storedMethod, at: new Date().toISOString() }
 );
 
-return res.json({ ok: true, verified: true, level: paPassed ? 'strong' : 'basic',
-                  passiveAuthentication: pa.status });
+return res.json({ ok: true, verified: true, level, passiveAuthentication: pa.status });
 ```
 
 У таблиці `contributors` після верифікації зʼявляються три значення:

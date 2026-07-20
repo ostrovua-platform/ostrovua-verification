@@ -61,27 +61,32 @@ struct PassportMRZ: Equatable {
               let mm = Int(trimmed.dropFirst(2).prefix(2)),
               let dd = Int(trimmed.dropFirst(4)) else { return nil }
 
-        // Рік: термін дії — завжди 20YY; дата народження — 19YY/20YY
-        // (майбутнє неможливе → якщо 20YY у майбутньому, це 19YY).
-        var year = 2000 + yy
-        if isExpiry == false, year > Calendar.current.component(.year, from: Date()) {
-            year -= 100
-        }
-
-        var components = DateComponents()
-        components.year = year
-        components.month = mm
-        components.day = dd
-
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
 
-        // Строга перевірка: збираємо дату й розбираємо назад.
-        // Неіснуюча дата (31 лютого) «переповниться» в наступний місяць
-        // і компоненти не збіжаться — відхиляємо.
-        guard let date = calendar.date(from: components) else { return nil }
-        let back = calendar.dateComponents([.year, .month, .day], from: date)
-        guard back.year == year, back.month == mm, back.day == dd else { return nil }
+        func strictDate(year: Int) -> Date? {
+            var components = DateComponents()
+            components.year = year
+            components.month = mm
+            components.day = dd
+            // Строга перевірка: збираємо дату й розбираємо назад.
+            // Неіснуюча дата (31 лютого) «переповниться» в наступний
+            // місяць і компоненти не збіжаться — відхиляємо.
+            guard let date = calendar.date(from: components) else { return nil }
+            let back = calendar.dateComponents([.year, .month, .day], from: date)
+            guard back.year == year, back.month == mm, back.day == dd else { return nil }
+            return date
+        }
+
+        // Рік: термін дії — завжди 20YY. Дата народження — 19YY/20YY,
+        // і порівнюємо ПОВНУ ДАТУ з сьогодні, а не лише рік: раніше
+        // «260731» у 2026-му проходив як народження в майбутньому
+        // (аудит P2-01) — тепер майбутня 20YY-дата стає 19YY.
+        let year = 2000 + yy
+        guard let date = strictDate(year: year) else { return nil }
+        if isExpiry == false, date > Date() {
+            return strictDate(year: year - 100)
+        }
         return date
     }
 

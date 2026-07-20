@@ -48,8 +48,30 @@ function configured() {
 // ── CHALLENGES (одноразові nonce, TTL 5 хв, прив'язані до користувача) ───────
 const challenges = new Map(); // id -> { contributorId, bytes, expiresAt }
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const MAX_CHALLENGES = 5000;         // жорсткий ліміт памʼяті (аудит P1-02)
+const MAX_PER_CONTRIBUTOR = 8;       // анти-флуд на один акаунт
+
+// Протухлі челенджі раніше висіли в памʼяті вічно — прибираємо щохвилини
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, c] of challenges) if (now > c.expiresAt) challenges.delete(id);
+}, 60 * 1000).unref();
 
 function issueChallenge(contributorId) {
+  // Ліміт на акаунт: новий челендж витісняє найстаріші свої ж
+  let mine = 0;
+  for (const [id, c] of challenges) {
+    if (c.contributorId !== contributorId) continue;
+    mine++;
+    if (mine >= MAX_PER_CONTRIBUTOR) challenges.delete(id);
+  }
+  // Глобальний ліміт: fail-closed, а не безмежне зростання памʼяті
+  if (challenges.size >= MAX_CHALLENGES) {
+    const now = Date.now();
+    for (const [id, c] of challenges) if (now > c.expiresAt) challenges.delete(id);
+    if (challenges.size >= MAX_CHALLENGES) throw new Error('Челенджі вичерпано, спробуй пізніше');
+  }
+
   const id    = crypto.randomBytes(16).toString('base64url');
   const bytes = crypto.randomBytes(32);
   challenges.set(id, { contributorId, bytes, expiresAt: Date.now() + CHALLENGE_TTL_MS });

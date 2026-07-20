@@ -143,3 +143,70 @@ fraud controls, trust-list ops.
 (коміт 4efc761 не потрапив у snapshot); (2) «PA_ENFORCE=false →
 verified basic» — видалено. Просимо повторний прогін обох PoC
 на HEAD.
+
+## Update (за зауваженнями повторної перевірки)
+
+**Пін-файли тепер ОПУБЛІКОВАНІ** (`Server/pins_ua.txt`,
+`Server/pins_ml_signer.txt`) — відбитки публічних сертифікатів,
+секретом не є; git-історія фіксує момент довіри, кожен відбиток
+перевіряється за BSI/ICAO незалежно. **TOFU-вікно закрито:** без
+pins-файлів `fetch_masterlist.sh` тепер ЗУПИНЯЄТЬСЯ (fail-closed);
+перша фіксація можлива лише явним `ALLOW_TOFU=1` з наступною
+звіркою за другим джерелом (`crosscheck_icao.sh`). «Перший запуск
+приймає будь-який C=UA» більше не відтворюється.
+
+**Щодо «подвійного хешування» assertion:** формула сервера —
+`clientDataHash = SHA256(challenge ‖ rawBody)`,
+`nonce = SHA256(authenticatorData ‖ clientDataHash)`, підпис
+перевіряється ECDSA-SHA256 над nonce (тобто digest =
+SHA256(nonce)). Це відповідає референсному серверному флоу Apple
+для App Attest assertions. Емпіричне підтвердження: справжні
+assertions реальних iPhone проходять перевірку в продакшені
+(лог `[verify/approve] … level=strong pa=passed`, обхідні режими
+вимкнені й ігноруються в production на рівні коду). Якщо у вас
+відтворюється кейс, де валідна assertion НЕ проходить або
+невалідна проходить — надішліть, розберемо негайно.
+
+**Counter:** суворо зростаючий (`counter <= stored` → відмова),
+оновлюється після кожної перевірки; replay того самого assertion
+неможливий також через одноразовість challenge (consume + TTL).
+
+## Update 2 — відповідь на аудит 2026-07-20 (snapshot 83f885a)
+
+Причина повторного відтворення PoC trust-store: коміт з пінами і
+fail-closed bootstrap НЕ потрапив у snapshot (людський фактор —
+локальний коміт не був запушений до зняття архіву). У поточному
+HEAD: `Server/pins_ua.txt`, `Server/pins_ml_signer.txt`,
+fail-closed `fetch_masterlist.sh` (без пінів — СТОП; TOFU лише
+явним `ALLOW_TOFU=1`). Просимо перепрогнати PoC пп. 4–5 evidence.
+
+Визнані та ВИПРАВЛЕНІ знахідки цього аудиту:
+
+- **P2-01 (century):** дата народження `260731` у 2026-му тепер
+  1926, а не майбутнє-2026 — порівнюється повна дата з сьогодні,
+  обидва століття проходять сувору календарну перевірку
+  (`PassportMRZ.date(fromYYMMDD:)`).
+- **P1-01 (undefined paPassed):** дефект був у ДОКУМЕНТАЦІЙНОМУ
+  фрагменті (server-side.md:51), не в продакшн-коді (перевірено
+  grep-ом по бойовому server.js); фрагмент приведено у відповідність.
+- **P1-02 (челенджі):** щохвилинний sweep протухлих, глобальний
+  ліміт 5000 (fail-closed 503), ліміт 8 на акаунт з витісненням.
+- **P1-03 (атомарність counter):** запис через compare-and-swap
+  (`where counter < new`, вимога `affected_rows == 1`) — паралельний
+  replay одного assertion програє гонку детерміновано.
+- **P1-07 (token-код відсутній):** фрагмент дедуплікації документів
+  доданий у server-side.md; повна серверна логіка — у продакшн-коді,
+  формула і властивості — threat-model.
+- **P0-06 (артефакти):** опубліковано `Server/package.json`
+  (залежності verifier'а), `Server/Apple_App_Attestation_Root_CA.pem`
+  (корінь довіри перевірки атестацій), `Provenance/OstrovUA.entitlements`
+  (`appattest-environment=production`).
+
+Позиції без змін (прийнято, roadmap, НЕ заявляємо зробленим):
+P0-02 (розділення claims strong/standard на рівні авторизації),
+P0-03 (measured PAD), P0-04 (біометрична валідація моделі),
+P1-04 (CRL), P1-05 (Chip/Active Auth як обовʼязковий evidence —
+наступна віха, DG14/DG15 на цільових документах підтверджені),
+P1-08/09 (state machine/actor рефакторинг), P1-11 (rollback/freshness
+операційного контуру), P1-12 (зріла ASN.1 + fuzz), P2-02, P2-03,
+P2-05, P2-06, P2-07.

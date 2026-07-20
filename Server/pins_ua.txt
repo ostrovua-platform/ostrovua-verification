@@ -1,0 +1,11 @@
+# Довірені CSCA України (SHA-256 відбитки сертифікатів).
+# У корінь довіри Passive Authentication потрапляють ЛИШЕ ці.
+# Джерело: німецький BSI masterlist DE_ML_2026-05-28 (deploy п.46, 2026-07-19).
+# Новий сертифікат додавати ТІЛЬКИ після звірки за другим джерелом
+# (ICAO PKD / npkd.nl) — див. Server/fetch_masterlist.sh.
+
+6a1f5136b12017c1721cf547cc8c5aa5d11383f14cdf2443f94817924f6b6016  # CSCA-UKRAINE, UA-16286441-0001, 2015-03-24 → 2030-06-24
+5e97b0f735788b488333778034f542e738b4cfd4f3e21a2e7df02be83259f365  # CSCA-UKRAINE, UA-16286441-0001, 2020-03-17 → 2035-06-17
+477163b321fb19bfbe9e0af0247ccd5151eae7972ca6b863e9c474140eb41a9a  # CSCA-UKRAINE, UA-16286441-0001, 2020-03-17 → 2035-06-17 (link)
+cd414261fd3f6db7dc3bef4673a2dcb56958fd49095c4acacbb7ff8a0aaffd93  # CSCA-UKRAINE, Kyiv, 2024-10-24 → 2040-01-24
+ef743ad7957a891ac7a27724658457ddd5497993d21ce9b58ac6b88b7772eaeb  # CSCA-UKRAINE, Kyiv, 2024-10-24 → 2040-01-24 (link)

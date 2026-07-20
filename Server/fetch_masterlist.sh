@@ -94,10 +94,13 @@ if [ -f ml_signer.pem ]; then
       echo "    Джерело могло бути підмінено. СТОП."
       exit 1
     fi
-  else
-    echo "  ⚠ Піна підписанта ще немає (перший запуск). Відбиток:"
+  elif [ "${ALLOW_TOFU:-0}" = "1" ]; then
+    echo "  ⚠ Піна підписанта ще немає (TOFU-режим). Відбиток:"
     echo "    $MLFP"
     echo "    Записано в pins_ml_signer.generated.txt — забери на Мак як pins_ml_signer.txt."
+  else
+    echo "  ✗ pins_ml_signer.txt відсутній, TOFU не дозволено. СТОП."
+    exit 1
   fi
 fi
 
@@ -118,6 +121,17 @@ python3 extract_certs.py content.der certs
 UA=0; ALL=0; SKIPPED=0
 HAVE_PINS=0
 [ -f pins_ua.txt ] && HAVE_PINS=1
+
+# FAIL-CLOSED BOOTSTRAP: без pins_ua.txt довіру НЕ будуємо. TOFU
+# (перший запуск з фіксацією нових пінів) — ЛИШЕ явним ALLOW_TOFU=1,
+# з подальшою звіркою за другим джерелом (crosscheck_icao.sh).
+# Інакше «перший запуск» міг би мовчки прийняти будь-який C=UA.
+if [ "$HAVE_PINS" = "0" ] && [ "${ALLOW_TOFU:-0}" != "1" ]; then
+  echo "✗ pins_ua.txt відсутній. Довіра без пінів НЕ встановлюється."
+  echo "  Свідомий перший запуск: ALLOW_TOFU=1 bash auth/csca/fetch_masterlist.sh"
+  echo "  Потім: звір відбитки за другим джерелом і зафіксуй pins_ua.txt у git."
+  exit 1
+fi
 
 for pem in certs/cert_*.pem; do
   SUBJ=$(openssl x509 -in "$pem" -noout -subject 2>/dev/null || echo "")
