@@ -22,11 +22,15 @@
 
 // SHA256(challenge ‖ rawBody), тож перевіряти треба саме ті байти,
 // що надіслав клієнт, а не пере-серіалізований JSON.
-app.use(express.json({
-  limit: '40mb',
-  verify: (req, _res, buf) => { req.rawBody = buf; },
-}));
-app.use(express.urlencoded({ extended: true, limit: '4mb' }));
+// express.json rawBody (split limits, аудит P1-07):
+
+const captureRaw = (req, _res, buf) => { req.rawBody = buf; };
+const bigJson   = express.json({ limit: '40mb',  verify: captureRaw });
+const smallJson = express.json({ limit: '512kb', verify: captureRaw });
+app.use((req, res, next) =>
+  (req.path === '/auth/upload' ? bigJson : smallJson)(req, res, next));
+app.use(express.urlencoded({ extended: true, limit: '512kb' }));
+
 
 
 app.post('/auth/verify/challenge', rateLimit, (req, res) => {
@@ -91,11 +95,7 @@ async function verifyAppAttestAssertion(req, contributorId) {
 
 
 async function verifyDeviceAttestation(req, contributorId) {
-  // ⚠ Локальний тест без атестації: VERIFY_DEV_BYPASS=1.
-  // У production ІГНОРУЄТЬСЯ незалежно від .env — обходу не існує.
-  if (process.env.VERIFY_DEV_BYPASS === '1' && process.env.APP_ENV !== 'production') return true;
-  if (req.headers['x-app-attest'])     return verifyAppAttestAssertion(req, contributorId);
-  if (req.headers['x-play-integrity']) return verifyPlayIntegrity(req.headers['x-play-integrity'], contributorId);
+  if (req.headers['x-app-attest']) return verifyAppAttestAssertion(req, contributorId);
   return false;
 }
 
@@ -188,10 +188,8 @@ app.post('/auth/verify/approve', rateLimit, async (req, res) => {
   }
 
   // ── Passive Authentication (ICAO 9303): серверна перевірка SOD ────
-  // ОБОВʼЯЗКОВА (аудит P0-02): «basic»-видачу Verified ID видалено.
-  // Немає криптодоказу справжності документа — немає Verified ID.
-  // Аварійний обхід існує лише як VERIFY_DEV_BYPASS для локальної
-  // розробки і НЕ працює у production-збірці процесу.
+  // ОБОВʼЯЗКОВА: немає криптодоказу справжності документа — немає
+  // Verified ID. Обходу не існує (dev-bypass фізично видалено).
   const pa = await passiveauth.verifySOD({ sodBase64: sod, dgHashes });
 
   if (pa.status !== 'passed') {
@@ -214,43 +212,51 @@ app.post('/auth/verify/approve', rateLimit, async (req, res) => {
     .update('doc-token-v1:' + pa.sodDG1Hash).digest('hex');
 
   try {
-    const dt = await hasuraAdmin(
-      `query($t: String!, $c: uuid!) {
-         byToken: document_tokens(where:{token:{_eq:$t}}, limit:1) { token contributor_id status }
-         byContributor: document_tokens(where:{contributor_id:{_eq:$c}}, limit:1) { token status }
+    // Зміна паспорта: звільняємо СВІЙ попередній токен (той самий акаунт —
+    // не гонка), інакше унікальний індекс contributor_id завадить привʼязці.
+    await hasuraAdmin(
+      `mutation($c: uuid!, $t: String!) {
+         delete_document_tokens(where:{ contributor_id:{_eq:$c},
+                                        token:{_neq:$t}, status:{_eq:"active"} }) { affected_rows }
        }`,
-      { t: docToken, c: contributorId }
+      { c: contributorId, t: docToken }
     );
-    const existing = dt.byToken?.[0];
 
-    // Документ забанений — верифікації не буде НІКОЛИ, навіть у новому акаунті
-    if (existing && existing.status === 'banned') {
-      console.warn(`[verify/approve] BANNED DOC ${contributorId.slice(0,8)}…`);
-      return res.status(403).json({ error: 'Цей документ заблоковано за порушення правил спільноти.' });
-    }
-    // Документ уже підтверджує ІНШИЙ живий акаунт — дублікат
-    if (existing && existing.contributor_id && existing.contributor_id !== contributorId) {
+    // АТОМАРНА привʼязка (аудит P0-02): один запит INSERT … ON CONFLICT
+    // DO UPDATE … WHERE. Оновлюємо contributor_id ЛИШЕ якщо рядок ще
+    // не привʼязаний (NULL) або вже наш, і статус active. Два акаунти,
+    // що одночасно клеймлять один документ, серіалізуються на PK токена:
+    // перший привʼязує, другий не проходить WHERE і повертає 0 рядків.
+    const claim = await hasuraAdmin(
+      `mutation($obj: document_tokens_insert_input!, $c: uuid!, $at: timestamptz!) {
+         insert_document_tokens_one(object:$obj,
+           on_conflict:{ constraint: document_tokens_pkey,
+                         update_columns:[contributor_id, last_verified_at],
+                         where:{ _or:[{contributor_id:{_is_null:true}},
+                                      {contributor_id:{_eq:$c}}],
+                                 status:{_eq:"active"} } }
+         ) { token contributor_id }
+       }`,
+      { obj: { token: docToken, contributor_id: contributorId,
+               last_verified_at: new Date().toISOString() }, c: contributorId,
+        at: new Date().toISOString() }
+    );
+
+    const bound = claim.insert_document_tokens_one;
+    if (!bound || bound.contributor_id !== contributorId) {
+      // Привʼязка не вдалась → зʼясовуємо чому (забанений / чужий)
+      const info = await hasuraAdmin(
+        `query($t: String!) { document_tokens(where:{token:{_eq:$t}}, limit:1) { contributor_id status } }`,
+        { t: docToken }
+      );
+      const row = info.document_tokens?.[0];
+      if (row?.status === 'banned') {
+        console.warn(`[verify/approve] BANNED DOC ${contributorId.slice(0,8)}…`);
+        return res.status(403).json({ error: 'Цей документ заблоковано за порушення правил спільноти.' });
+      }
       console.warn(`[verify/approve] DUPLICATE DOC ${contributorId.slice(0,8)}…`);
       return res.status(409).json({ error: 'Цей документ уже використано для верифікації іншого акаунта.' });
     }
-    // Зміна паспорта: акаунт мав інший (не забанений) токен — звільняємо
-    const old = dt.byContributor?.[0];
-    if (old && old.token !== docToken && old.status !== 'banned') {
-      await hasuraAdmin(
-        `mutation($t: String!) { delete_document_tokens_by_pk(token:$t) { token } }`,
-        { t: old.token }
-      );
-    }
-    // Привʼязуємо документ до акаунта (новий або «осиротілий» після
-    // видалення попереднього акаунта)
-    await hasuraAdmin(
-      `mutation($obj: document_tokens_insert_input!) {
-         insert_document_tokens_one(object:$obj,
-           on_conflict:{constraint: document_tokens_pkey,
-                        update_columns:[contributor_id, last_verified_at]}) { token }
-       }`,
-      { obj: { token: docToken, contributor_id: contributorId, last_verified_at: new Date().toISOString() } }
-    );
   } catch (e) {
     // Fail-closed: без роботи дедуплікації Verified ID не видаємо
     console.error('[verify/approve] document_tokens:', e.message);

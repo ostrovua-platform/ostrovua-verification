@@ -33,9 +33,11 @@ const path = require('path');
 const { execFile } = require('child_process');
 
 const MASTERLIST = process.env.CSCA_MASTERLIST || '/app/csca/csca_ua.pem';
-// Вимкнення перевірки строку дії DSC: ЛИШЕ поза production (аудит P1-01).
+// Вимкнення перевірки строку дії DSC — FAIL-CLOSED (аудит P1-01):
+// дозволено ЛИШЕ при ЯВНОМУ APP_ENV=development. Будь-яка опечатка
+// в APP_ENV трактується як production і НЕ вмикає no_check_time.
 const NO_CHECK_TIME =
-  process.env.PA_NO_CHECK_TIME === '1' && process.env.APP_ENV !== 'production';
+  process.env.PA_NO_CHECK_TIME === '1' && process.env.APP_ENV === 'development';
 const REQUIRE_UA = process.env.PA_REQUIRE_UA !== '0';
 
 const MAX_SOD_B64_CHARS = 96 * 1024; // ліміт ДО decode (реальний SOD ~2-7 КБ b64)
@@ -43,11 +45,17 @@ const MAX_SOD_BYTES = 64 * 1024;
 const OPENSSL_TIMEOUT_MS = 5000;
 const MAX_CONCURRENT = 2;            // семафор: не блокуємо auth-сервіс
 
-// ── Простий семафор ─────────────────────────────────────────────────
+// ── Семафор з ОБМЕЖЕНОЮ чергою (аудит P1-07) ────────────────────────
+// Черга очікування не безмежна: під навантаженням зайві запити
+// відхиляються (fail-fast), а не накопичуються в памʼяті.
+const MAX_WAITERS = 64;
 let running = 0;
 const waiters = [];
 function acquire() {
   if (running < MAX_CONCURRENT) { running++; return Promise.resolve(); }
+  if (waiters.length >= MAX_WAITERS) {
+    return Promise.reject(new Error('PA overloaded'));
+  }
   return new Promise((resolve) => waiters.push(resolve));
 }
 function release() {
@@ -182,7 +190,12 @@ function stripIcaoWrapper(buf) {
 // 'failed'      — SOD битий/підроблений/не збігаються хеші → ВІДМОВА.
 // 'unavailable' — проблема КОНФІГУРАЦІЇ сервера (немає masterlist).
 async function verifySOD({ sodBase64, dgHashes }) {
-  await acquire();
+  try {
+    await acquire();
+  } catch {
+    // Черга перевантажена → тимчасово недоступно (fail-closed, не 500)
+    return { status: 'unavailable', reason: 'overloaded' };
+  }
   let tmp;
   try {
     if (typeof sodBase64 !== 'string' || !sodBase64 || sodBase64.length > MAX_SOD_B64_CHARS) {

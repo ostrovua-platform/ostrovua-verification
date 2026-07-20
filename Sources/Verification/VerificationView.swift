@@ -33,6 +33,14 @@ struct VerificationView: View {
     @State private var isMatchingFace = false
     @State private var faceMatchError: String?
 
+    /// Монотонний ідентифікатор транзакції верифікації (аудит P1-05).
+    /// Кожен новий запуск face-check піднімає лічильник; асинхронний
+    /// результат застосовується ЛИШЕ якщо його txn ще актуальний —
+    /// stale-колбек скасованої/перезапущеної сесії ігнорується.
+    @State private var verifyTxn = 0
+    /// Активна задача звірки — щоб скасувати при уході/скиданні.
+    @State private var faceCheckTask: Task<Void, Never>?
+
     /// Статус Verified ID пишеться в базу — чекаємо на відповідь
     @ObservedObject private var session = CurrentSession.shared
     @State private var isSavingStatus = false
@@ -73,6 +81,12 @@ struct VerificationView: View {
         .onChange(of: screen) { _, newScreen in
             if newScreen != .face {
                 faceManager.stop()
+                // Пішли з екрана обличчя → скасовуємо звірку й робимо
+                // будь-який її асинхронний результат stale (P1-05).
+                verifyTxn &+= 1
+                faceCheckTask?.cancel()
+                faceCheckTask = nil
+                isMatchingFace = false
             }
             if newScreen != .mrz {
                 mrzScanner.stop()
@@ -757,6 +771,13 @@ struct VerificationView: View {
     /// PRIVACY: стирает из памяти всё, что читалось с документа.
     /// В приложении остаётся только статус Verified ID.
     private func wipeSensitiveData() {
+        // Скасовуємо активну транзакцію верифікації (P1-05): жоден
+        // асинхронний результат старої сесії не застосується після wipe.
+        verifyTxn &+= 1
+        faceCheckTask?.cancel()
+        faceCheckTask = nil
+        isMatchingFace = false
+
         viewModel.reset()                 // passportData = nil
         viewModel.mrz = PassportMRZ()     // MRZ-ключ
         viewModel.mrzLine = ""
@@ -767,9 +788,13 @@ struct VerificationView: View {
     /// Liveness → сверка живого лица с фото из DG2 чипа.
     private func startFaceCheck() {
         faceMatchError = nil
+        // Нова транзакція: усі попередні асинхронні результати стають stale.
+        verifyTxn &+= 1
+        let txn = verifyTxn
+        faceCheckTask?.cancel()
 
         faceManager.startCheck { success in
-            guard success else { return }
+            guard success, txn == verifyTxn else { return }   // stale-guard
 
             guard
                 let chipPhoto = nfcManager.chipPhoto,
@@ -777,8 +802,6 @@ struct VerificationView: View {
             else {
                 // FAIL-CLOSED: немає фото з чипа (DG2) або кадру обличчя —
                 // сверку зробити НЕМОЖЛИВО, тож верифікація НЕ проходить.
-                // Раніше тут був fail-open (одразу «успіх») — критична дірка:
-                // документ без читабельного DG2 підтверджувався без обличчя.
                 faceMatchError = trs("Не вдалося прочитати фото з чипа документа. Верифікація неможлива без звірки обличчя.")
                 faceManager.reset()
                 return
@@ -788,9 +811,19 @@ struct VerificationView: View {
             guard isMatchingFace == false else { return }
             isMatchingFace = true
 
-            Task {
+            faceCheckTask = Task {
+                // Скасування (уход з екрана/reset) — не застосовуємо результат
+                if Task.isCancelled || txn != verifyTxn {
+                    await MainActor.run { isMatchingFace = false }
+                    return
+                }
                 do {
                     let result = try await FaceMatcher.match(chipPhoto: chipPhoto, liveFace: liveFace)
+                    // Після await повторно перевіряємо актуальність транзакції
+                    if Task.isCancelled || txn != verifyTxn {
+                        await MainActor.run { isMatchingFace = false }
+                        return
+                    }
 
                     switch result.verdict {
                     case .match:
@@ -819,6 +852,11 @@ struct VerificationView: View {
                             dgHashes: nfcManager.dgHashes
                         )
                         let saved = await CurrentSession.shared.markVerified(evidence: evidence)
+                        // Транзакція могла застаріти під час мережевого підтвердження
+                        if txn != verifyTxn {
+                            await MainActor.run { isMatchingFace = false }
+                            return
+                        }
 
                         await MainActor.run {
                             isMatchingFace = false

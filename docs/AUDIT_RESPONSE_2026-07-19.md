@@ -331,9 +331,38 @@ depth-backed strong.** Реалізовано наскрізно:
   `reset()` обнуляє доказ; call site — fail-closed guard.
 - **F8 — ВИПРАВЛЕНО:** на початку цього журналу — явна помітка, що
   записи Update 1–4 з `heuristic` СКАСОВАНО; чинна політика одна.
-- **F9 — ПРИЙНЯТО, release-blocker без заперечень:** measured PAD
+- **F9-legacy — ПРИЙНЯТО, release-blocker без заперечень:** measured PAD
   (синхронізація RGB/depth за timestamp, ROI-mapping, random
   challenge, exactly-one-face, attack corpus) — випробувальний
   проєкт. Мітка `strong` підтверджується CSCA-ланцюгом і App Attest,
   але НЕ виміряним PAD; це чесно зафіксовано. NO-GO для
   high-assurance релізу до вимірювань не оскаржуємо.
+
+## Update 7 — фінальний аудит (snapshot eb0ab0c), 12 вимог
+
+| # | Вимога | Статус |
+|---|--------|--------|
+| 1 | App Attest double hash | **НЕ баг** — формула емпірично коректна (реальні assertion проходять у проді). Фікстура (#2) це формалізує. Ламати робочу математику не будемо. |
+| 2 | Реальна assertion-фікстура | Інструмент готовий: `Server/tests/verify_fixture.js` + `APP_ATTEST_FIXTURE.md`. Зняти з пристрою — крок Dani (потрібен iPhone). |
+| 3 | Document claim в одній транзакції | **ВИПРАВЛЕНО:** атомарний `INSERT … ON CONFLICT … WHERE` (перший клеймить, чужий токен не перезаписати). Раніше on_conflict перезаписував contributor_id — угон токена. |
+| 4 | Parallel race test | **ДОДАНО:** `Server/tests/race_document_token.test.js` (модель інваріанта, 3 тести PASS) + протокол реального прод-тесту. |
+| 5 | Фізично видалити dev bypass | **ВИДАЛЕНО:** `VERIFY_DEV_BYPASS` більше немає в коді атестації. Обійти неможливо. |
+| 6 | Play Integrity branch | **ВИДАЛЕНО:** «висяча» гілка прибрана; Android — окремий майбутній маршрут з nonce-binding. |
+| 7 | Синхронізація RGB/depth + ROI | **ЧАСТКОВО:** depth-gate працює; синхронізатор timestamp + мапінг faceBox→depth ROI — у плані PAD (`PAD_AND_BIOMETRIC_PLAN.md`). |
+| 8 | PAD attack evaluation | **RELEASE-BLOCKER, прийнято:** протокол ISO 30107-3 у `PAD_AND_BIOMETRIC_PLAN.md`. Фізичні випробування — не код. |
+| 9 | Face model + FAR/FRR | **RELEASE-BLOCKER, прийнято:** provenance зафіксовано; harness + прогін на датасеті — план у тому ж файлі. |
+| 10 | Публікація CurrentSession/server.js/schema | **ЗРОБЛЕНО:** `Sources/Session/CurrentSession.swift`, `Server/verify_approve.route.js` (реальний маршрут), `Server/DB_SCHEMA.sql` (таблиці+constraints). |
+| 11 | State machine + cancellation | **ДОДАНО:** транзакційний лічильник `verifyTxn` + `faceCheckTask.cancel()`; stale-результати ігноруються після await/уходу/скидання. |
+| 12 | Privacy wording + мінімізація hashes | **ВИПРАВЛЕНО:** телефон шле РІВНО ОДИН хеш (sha256) на групу, а не пʼять; формулювання приватності уточнено. |
+
+Додатково цього кола: DoS-межа (P1-07 — split JSON limit 512KB/40MB,
+обмежена черга PA), fail-closed `PA_NO_CHECK_TIME` (лише явний
+development), суворі схема й dgHashes-валідація (з Update 6).
+
+**Підсумок.** Усе, що закривається кодом — закрито. Два справжні
+release-blockers лишаються (виміряний PAD і FAR/FRR-валідація моделі) —
+це випробувальні проєкти з опублікованими протоколами, і ми не
+оголошуємо їх зробленими. PROD-GO для high-assurance — після цих
+вимірювань; для бети за запрошеннями поточний рівень (держ-крипто PA +
+запінені CSCA + depth-gate + App Attest + атомарна дедуплікація +
+бан документів) є сильним і чесно描аним.

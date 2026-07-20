@@ -2,7 +2,6 @@ import Foundation
 import Combine
 import UIKit
 import CryptoKit
-import CommonCrypto
 
 #if canImport(NFCPassportReader) && !targetEnvironment(simulator)
 import NFCPassportReader
@@ -48,25 +47,14 @@ final class NFCVerificationManager: NSObject, ObservableObject {
         dgHashes = [:]
     }
 
-    /// Усі дозволені ICAO алгоритми одним махом: сервер порівнює тим,
-    /// який записано в SOD (український — SHA-256, але не вгадуємо).
-    /// SHA-224 нема в CryptoKit — рахуємо через CommonCrypto.
-    private static func allHashes(_ data: Data) -> [String: String] {
-        [
-            "sha1": Insecure.SHA1.hash(data: data).map { String(format: "%02x", $0) }.joined(),
-            "sha224": sha224Hex(data),
-            "sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
-            "sha384": SHA384.hash(data: data).map { String(format: "%02x", $0) }.joined(),
-            "sha512": SHA512.hash(data: data).map { String(format: "%02x", $0) }.joined(),
-        ]
-    }
-
-    private static func sha224Hex(_ data: Data) -> String {
-        var digest = [UInt8](repeating: 0, count: Int(CC_SHA224_DIGEST_LENGTH))
-        data.withUnsafeBytes { buffer in
-            _ = CC_SHA224(buffer.baseAddress, CC_LONG(buffer.count), &digest)
-        }
-        return digest.map { String(format: "%02x", $0) }.joined()
+    /// МІНІМІЗАЦІЯ (аудит #12): надсилаємо РІВНО ОДИН хеш — той
+    /// алгоритм, яким підписаний SOD українського документа (SHA-256,
+    /// підтверджено зчитуванням реальних паспортів). Раніше слали пʼять
+    /// хешів «про всяк випадок» — зайві звʼязувані ідентифікатори
+    /// покидали телефон. Якщо документ використає інший алгоритм, сервер
+    /// відповість зрозумілою помилкою (client_hash_missing_*).
+    private static func minimalHash(_ data: Data) -> [String: String] {
+        ["sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()]
     }
 
     // MARK: - Реальное чтение (устройство)
@@ -158,8 +146,8 @@ final class NFCVerificationManager: NSObject, ObservableObject {
 
                 self.chipSOD = Data(sodGroup.data)
                 self.dgHashes = [
-                    "dg1": Self.allHashes(Data(dg1Group.data)),
-                    "dg2": Self.allHashes(Data(dg2Group.data)),
+                    "dg1": Self.minimalHash(Data(dg1Group.data)),
+                    "dg2": Self.minimalHash(Data(dg2Group.data)),
                 ]
 
                 self.result = .success("Документ України підтверджено: \(fullName.isEmpty ? data.documentNumber : fullName)")
