@@ -798,11 +798,21 @@ struct VerificationView: View {
                         // Успіх показуємо ЛИШЕ після підтвердження бази,
                         // а не до нього (раніше UI брехав про Verified).
                         //
+                        // FAIL-CLOSED (F7): evidence будується з ТИПІЗОВАНОГО
+                        // доказу depth-перевірки. Немає доказу — немає
+                        // верифікації (без «константи .depth» у коді).
+                        guard let livenessProof = faceManager.livenessProof else {
+                            await MainActor.run {
+                                isMatchingFace = false
+                                faceMatchError = trs("Живу присутність не підтверджено. Спробуй ще раз.")
+                                faceManager.reset()
+                            }
+                            return
+                        }
                         // SOD + хеші DG — сервер САМ виконує Passive
                         // Authentication (підпис держави → CSCA України).
-                        // Персональні поля документа не передаються.
                         let evidence = VerificationEvidence(
-                            liveness: .depth,   // єдиний рівень; без TrueDepth сюди не дійти
+                            livenessProof: livenessProof,
                             faceMatch: .passed,
                             faceModel: result.model,
                             sodBase64: nfcManager.chipSOD?.base64EncodedString(),

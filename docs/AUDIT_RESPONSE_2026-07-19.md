@@ -1,5 +1,14 @@
 # Відповідь на повний аудит від 2026-07-19 (snapshot b403f8e)
 
+> ⚠️ **ЗАСТАРІЛІ ПОЛІТИКИ В ЦЬОМУ ЖУРНАЛІ (F8).** Це історичний
+> changelog. Ранні записи (Update 1–4) згадують `liveness:
+> depth|heuristic`, «heuristic → standard», `liveness ∈ {depth,
+> heuristic}` — ці політики **СКАСОВАНО** в Update 5. Чинна політика
+> одна: **єдиний рівень видачі — depth-backed strong**; евристичного
+> рівня не існує ні в коді, ні в схемі (`liveness` enum містить лише
+> `depth`, сервер відхиляє все інше). Пошук по репозиторію повертає
+> ці рядки лише як історію, не як чинну поведінку.
+
 Дякуємо за глибокий аудит і робочі PoC. Важливий контекст: аудит
 виконано по snapshot **b403f8e** — коміт **4efc761** (CSCA pinning,
 TrueDepth depth liveness, уточнена threat-model) на момент аудиту
@@ -287,3 +296,44 @@ depth-backed strong.** Реалізовано наскрізно:
 Залишаються дві release-blocking позиції, обидві — випробувальні
 проєкти, обидві погоджені як умови релізу: measured PAD
 (ISO 30107-3) і незалежна біометрична валідація моделі (FAR/FRR).
+
+## Update 6 — focused heuristic-recheck (snapshot ddf1a45)
+
+Дякуємо за підтвердження Claim 1 (heuristic видалено). Claim 2
+(«byte-for-byte») визнаємо неточним — виправлено. По пунктах:
+
+- **F1 — ВИПРАВЛЕНО:** опубліковано ДОСЛІВНУ виписку реального
+  маршруту `Server/verify_approve.route.js` (rawBody-захоплення →
+  challenge → verifyAssertion → атомарний counter → PA → document
+  token → запис). `server-side.md` більше не називає фрагмент
+  byte-for-byte і посилається на реальний файл.
+- **F2 — ВИПРАВЛЕНО:** whitelist приведено у відповідність клієнту —
+  `challengeId` (завжди додає AppAttestService) прийнято й обовʼязкове;
+  `session` — опційний рядок. Розбіжність документації і клієнта усунуто.
+- **F3 — ВИПРАВЛЕНО:** схема тепер СПРАВДІ строга — невідомі ключі
+  payload відхиляються явно (`ALLOWED_KEYS`), `dgHashes` валідується
+  за формою (рівно {dg1,dg2}, hex правильної довжини за алгоритмом),
+  ліміт розміру SOD на межі маршруту. Тести: зайвий ключ / коротка
+  довжина / не-hex / невідомий алгоритм — усі відхилено.
+- **F4 — АДРЕСОВАНО публікацією маршруту:** end-to-end ланцюг
+  (rawBody до парсингу → ті самі байти у verifyAssertion → challengeId
+  без ре-серіалізації → consume-once з owner-check → counter CAS)
+  тепер видимий у `verify_approve.route.js`.
+- **F5 — ВИПРАВЛЕНО:** спільний `Outcome` розділено на типізовані
+  `LivenessEvidence`(лише `.trueDepthV1`) і `FaceMatchEvidence`(лише
+  `.passed`). Безглузда комбінація більше не компілюється.
+- **F6 — ВИПРАВЛЕНО:** клієнт вимагає інваріант сервера —
+  `level == "strong"` І `passiveAuthentication == "passed"`, інакше
+  верифікація відхиляється (захист від downgrade проксі/сервера).
+- **F7 — ВИПРАВЛЕНО:** `liveness` більше не константа й не «мертвий
+  рядок». Введено `DepthLivenessProof` (fileprivate init, єдина
+  фабрика в менеджері камери); evidence будується лише з нього;
+  `reset()` обнуляє доказ; call site — fail-closed guard.
+- **F8 — ВИПРАВЛЕНО:** на початку цього журналу — явна помітка, що
+  записи Update 1–4 з `heuristic` СКАСОВАНО; чинна політика одна.
+- **F9 — ПРИЙНЯТО, release-blocker без заперечень:** measured PAD
+  (синхронізація RGB/depth за timestamp, ROI-mapping, random
+  challenge, exactly-one-face, attack corpus) — випробувальний
+  проєкт. Мітка `strong` підтверджується CSCA-ланцюгом і App Attest,
+  але НЕ виміряним PAD; це чесно зафіксовано. NO-GO для
+  high-assurance релізу до вимірювань не оскаржуємо.

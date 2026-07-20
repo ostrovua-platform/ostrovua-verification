@@ -34,10 +34,11 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
     /// Остання мапа глибини (пишеться і читається на self.queue).
     private var latestDepth: AVDepthData?
 
-    /// Який режим liveness РЕАЛЬНО відпрацював. Політика: єдиний
-    /// рівень "depth" — без TrueDepth флоу зупиняється з E-406,
-    /// тож значення "none" ніколи не потрапляє в evidence.
-    private(set) var livenessMode: String = "none"
+    /// Типізований доказ живої присутності (аудит F7): не рядок-прапорець,
+    /// а `DepthLivenessProof`, який створюється ЛИШЕ тут після реальної
+    /// depth-перевірки. nil доти, доки перевірку не пройдено; скидається
+    /// у reset(). VerificationView будує evidence саме з нього.
+    private(set) var livenessProof: DepthLivenessProof?
 
     func startCheck(completion: @escaping (Bool) -> Void) {
         self.completion = completion
@@ -66,6 +67,7 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         faceConfidence = 0
         capturedFace = nil
         guidance = nil
+        livenessProof = nil          // доказ не переживає скидання (F7)
     }
 
     private func complete(success: Bool) {
@@ -291,8 +293,9 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         if detectedFrameCount >= 12 {
             session.stopRunning()
 
-            // Сюди можливо дійти лише з working depth (guard у configureCamera)
-            livenessMode = "depth"
+            // Сюди можливо дійти лише з working depth (guard у configureCamera).
+            // Типізований доказ — єдина точка його створення.
+            livenessProof = DepthLivenessProof.makeVerified()
 
             // Сохраняем кадр лица для сверки с фото из чипа (DG2)
             let faceImage = pixelBuffer.flatMap { Self.makeImage(from: $0) }

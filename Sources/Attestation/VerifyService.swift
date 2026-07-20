@@ -1,30 +1,50 @@
 import Foundation
 
-/// Докази перевірки, що застосунок ЧЕСНО повідомляє серверу.
-/// Значення — enum, а не «все пройдено»: сервер бачить, що саме
-/// виконано, і вирішує, який рівень довіри видати.
-///
-/// Passive Authentication робить СЕРВЕР: клієнт передає SOD (підписаний
-/// державою обʼєкт з хешами груп даних — БЕЗ імені/номера/фото) і хеші
-/// DG1/DG2, які реально прочитав. Сервер перевіряє підпис за CSCA
-/// України і збіг хешів. Тут клієнту на слово не вірять.
-struct VerificationEvidence {
-    enum Outcome: String { case passed, failed, depth }
+/// Окремі типи для КОЖНОЇ гарантії (аудит F5): спільний enum
+/// дозволяв безглузді комбінації (`liveness: .passed`). Тепер тип
+/// кодує саме ту політику, яку заявляє: liveness = лише TrueDepth,
+/// faceMatch = лише «збіглось». Невалідну комбінацію не скомпілювати.
+enum LivenessEvidence: String { case trueDepthV1 = "depth" }
+enum FaceMatchEvidence: String { case passed }
 
+/// Непідробний-на-рівні-типу доказ живої присутності: створюється
+/// ЛИШЕ FaceLivenessManager після реальної depth-перевірки (F7).
+/// Немає публічного ініціалізатора зі «звичайним» прапорцем.
+struct DepthLivenessProof {
+    let mode: LivenessEvidence
+    fileprivate init() { self.mode = .trueDepthV1 }
+    /// Єдина фабрика — викликається лише з менеджера камери після
+    /// підтвердженої обʼємності обличчя.
+    static func makeVerified() -> DepthLivenessProof { DepthLivenessProof() }
+}
+
+struct VerificationEvidence {
     var method = "nfc_passport"
-    /// ЄДИНИЙ рівень: .depth — TrueDepth підтвердив обʼємність обличчя.
-    /// Евристичного рівня не існує: без TrueDepth флоу зупиняється
-    /// ще на клієнті (E-406), сервер такий payload відхиляє.
-    var liveness: Outcome = .depth
-    var faceMatch: Outcome
-    var faceModel: String                                // "coreml" | "vision_fallback"
+    /// ЄДИНИЙ рівень: TrueDepth підтвердив обʼємність обличчя. Без
+    /// нього флоу зупиняється ще на клієнті (E-406).
+    let liveness: LivenessEvidence
+    let faceMatch: FaceMatchEvidence
+    var faceModel: String                                // лише "coreml" у release
     /// EF.SOD з чипа (base64 DER). Містить лише хеші DG, сертифікат
     /// і підпис — жодного персонального поля документа.
     var sodBase64: String?
     /// Хеші прочитаних груп даних: "dg1"/"dg2" → алгоритм → hex.
-    /// Кілька алгоритмів — бо сервер порівнює тим, що вказаний у SOD.
     var dgHashes: [String: [String: String]] = [:]
     var protocolVersion = 3
+
+    /// Створюється лише з типізованих доказів етапів — сирі рядки
+    /// сюди не потрапляють.
+    init(livenessProof: DepthLivenessProof,
+         faceMatch: FaceMatchEvidence,
+         faceModel: String,
+         sodBase64: String?,
+         dgHashes: [String: [String: String]]) {
+        self.liveness = livenessProof.mode
+        self.faceMatch = faceMatch
+        self.faceModel = faceModel
+        self.sodBase64 = sodBase64
+        self.dgHashes = dgHashes
+    }
 }
 
 enum VerifyService {
@@ -74,6 +94,13 @@ enum VerifyService {
 
         guard code == 200, (json["verified"] as? Bool) == true else {
             throw APIError.server((json["error"] as? String) ?? "Не вдалося підтвердити статус у базі.")
+        }
+        // Defense-in-depth (аудит F6): клієнт вимагає той самий інваріант,
+        // що обіцяє сервер — рівень strong і пройдену Passive Authentication.
+        // Захищає від випадкового downgrade сервера чи проксі.
+        guard (json["level"] as? String) == "strong",
+              (json["passiveAuthentication"] as? String) == "passed" else {
+            throw APIError.server(trs("Верифікацію не підтверджено на найвищому рівні. Спробуй ще раз."))
         }
 
         return true

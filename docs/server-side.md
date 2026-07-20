@@ -1,33 +1,44 @@
 # Що робить сервер при підтвердженні верифікації
 
-Точний фрагмент обробника `POST /auth/verify/approve` з продакшн-сервера
-(auth-мікросервіс, Node.js). Повний код Passive Authentication —
-[`Server/passiveauth.js`](../Server/passiveauth.js) (дослівна копія
-продакшн-модуля).
+> **Джерело істини — [`Server/verify_approve.route.js`](../Server/verify_approve.route.js):**
+> ДОСЛІВНА виписка реального маршруту `/auth/verify/approve` з продакшн
+> `server.js` (з ланцюгом App Attest: rawBody-захоплення, challenge,
+> `verifyAssertion`, атомарний counter). Фрагмент нижче — стислий огляд,
+> НЕ дослівний код (раніше формулювання «byte-for-byte» було неточним —
+> виправлено, аудит F1). Passive Authentication —
+> [`Server/passiveauth.js`](../Server/passiveauth.js).
 
 ```js
 // 1. Авторизація: JWT користувача (contributor_id — з клеймів)
-// 2. App Attest: assertion перевіряється над hash(challenge ‖ тіло запиту),
-//    counter захищає від replay. Тіло — канонічний JSON, підмінити
-//    його після підпису неможливо.
+// 2. App Attest: assertion перевіряється над hash(challenge ‖ rawBody),
+//    counter (compare-and-swap) захищає від replay. rawBody — дослівні
+//    байти тіла, захоплені express.json { verify } ДО парсингу.
 const okAttest = await verifyDeviceAttestation(req, contributorId);
 if (!okAttest) return res.status(403).json({ error: 'Device attestation required' });
 
-// 3. СТРОГА СХЕМА: кожне поле — whitelist, невідоме значення = 400.
-//    ЖОДНОГО поля документа в тілі немає.
+// 3. СТРОГА СХЕМА (F3): НЕВІДОМІ ключі відхиляються ЯВНО — сама
+//    деструктуризація JS їх не ловить. Дозволений рівно цей набір.
+const ALLOWED_KEYS = new Set(['method','liveness','faceMatch','faceModel',
+  'sod','dgHashes','protocolVersion','endpoint','challengeId','session']);
+if (Object.keys(req.body || {}).some(k => !ALLOWED_KEYS.has(k)))
+  return res.status(400).json({ error: 'Невідомі поля payload' });
+
 const { method, session, liveness, faceMatch, faceModel, sod, dgHashes,
-        protocolVersion, endpoint } = req.body || {};
+        protocolVersion, endpoint, challengeId } = req.body || {};
 
 if (method !== 'nfc_passport')                        return res.status(400).json({ error: '…' });
 if (protocolVersion !== 3)                            return res.status(400).json({ error: '…' });
 if (endpoint !== '/auth/verify/approve')              return res.status(400).json({ error: '…' });
+if (typeof challengeId !== 'string' || !challengeId)  return res.status(400).json({ error: '…' }); // F2
+if (session !== undefined && typeof session !== 'string') return res.status(400).json({ error: '…' });
 if (faceMatch !== 'passed' || faceModel !== 'coreml') return res.status(400).json({ error: '…' });
 // ПОЛІТИКА: єдиний рівень видачі — depth-backed strong.
-// Евристика Verified ID НЕ видає за жодних умов.
 if (liveness !== 'depth') {
   return res.status(400).json({ error: 'Для верифікації потрібен пристрій з Face ID (TrueDepth).' });
 }
-if (typeof sod !== 'string' || sod.length === 0)      return res.status(400).json({ error: 'SOD обовʼязковий' });
+if (typeof sod !== 'string' || sod.length === 0 || sod.length > 96*1024)
+  return res.status(400).json({ error: 'SOD відсутній або завеликий' });
+if (!isValidDgHashes(dgHashes)) return res.status(400).json({ error: '…' }); // {dg1,dg2}, hex за алгоритмом
 // … + перевірка форми dgHashes
 
 // 4. Passive Authentication — ОБОВʼЯЗКОВА. «Basic»-видачі без PA
