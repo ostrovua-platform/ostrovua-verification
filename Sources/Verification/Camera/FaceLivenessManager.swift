@@ -272,10 +272,12 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         // нахил не обманює) кадрів не набере → таймаут. Кадр без
         // свіжої глибини просто не зараховується (без скидання).
         if depthSupported {
-            guard let depth = latestDepth,
-                  Self.isVolumetricFace(depth, faceBox: faceBox) else {
-                return
-            }
+            guard let depth = latestDepth else { return }
+            let rms = Self.depthRMS(depth, faceBox: faceBox)
+            #if DEBUG
+            PADLogger.shared.record(rms: rms)   // збір для оцінки APCER/BPCER
+            #endif
+            guard let rms, rms >= Self.depthRMSThreshold else { return }
         }
 
         detectedFrameCount += 1
@@ -310,12 +312,20 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
 
     // MARK: - Обʼємність обличчя за мапою глибини (анти-фото/екран)
 
-    /// Least-squares площина по центральному вікну кадру глибини +
-    /// RMS-залишок. Фото/екран — площина (залишок ~шум сенсора, <2–3 мм)
-    /// незалежно від нахилу. Живе обличчя — ніс/щоки дають кривизну,
-    /// залишок ≥ ~5 мм. Це НЕ сертифікований PAD (маска обманить),
-    /// але клас атак «фото та відео з екрана» закриває по-справжньому.
+    /// Поріг обʼємності: RMS-залишок від площини (метри). Живе обличчя —
+    /// ніс/щоки дають кривизну ≥ 5 мм; плоске фото/екран — шум сенсора.
+    static let depthRMSThreshold: Double = 0.005
+
     private static func isVolumetricFace(_ depthData: AVDepthData, faceBox: CGRect) -> Bool {
+        guard let rms = depthRMS(depthData, faceBox: faceBox) else { return false }
+        return rms >= depthRMSThreshold
+    }
+
+    /// Least-squares площина по центральному вікну кадру глибини +
+    /// RMS-залишок (метри) або nil, якщо валідних точок замало.
+    /// Винесено окремо, щоб той самий вимір йшов і в gate, і в
+    /// PAD-лог (Tools/PADScore) для оцінки APCER/BPCER.
+    static func depthRMS(_ depthData: AVDepthData, faceBox: CGRect) -> Double? {
         let depth32: AVDepthData
         if depthData.depthDataType == kCVPixelFormatType_DepthFloat32 {
             depth32 = depthData
@@ -327,7 +337,7 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         CVPixelBufferLockBaseAddress(map, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
 
-        guard let base = CVPixelBufferGetBaseAddress(map) else { return false }
+        guard let base = CVPixelBufferGetBaseAddress(map) else { return nil }
         let width = CVPixelBufferGetWidth(map)
         let height = CVPixelBufferGetHeight(map)
         let rowBytes = CVPixelBufferGetBytesPerRow(map)
@@ -357,7 +367,7 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
 
         // Мало валідних точок → сенсор не бачить рельєфу (не зараховуємо)
         let expected = (side / step) * (side / step)
-        guard zs.count >= max(30, expected * 55 / 100) else { return false }
+        guard zs.count >= max(30, expected * 55 / 100) else { return nil }
 
         // Площина z = ax + by + c: нормальні рівняння 3×3 (Крамер)
         let n = Double(zs.count)
@@ -369,7 +379,7 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
             sxz += x * z; syz += y * z
         }
         let det = sxx * (syy * n - sy * sy) - sxy * (sxy * n - sy * sx) + sx * (sxy * sy - syy * sx)
-        guard abs(det) > 1e-9 else { return false }
+        guard abs(det) > 1e-9 else { return nil }
 
         let a = (sxz * (syy * n - sy * sy) - sxy * (syz * n - sy * sz) + sx * (syz * sy - syy * sz)) / det
         let b = (sxx * (syz * n - sz * sy) - sxz * (sxy * n - sx * sy) + sx * (sxy * sz - sx * syz)) / det
@@ -380,10 +390,7 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
             let r = zs[i] - (a * xs[i] + b * ys[i] + c)
             ss += r * r
         }
-        let rms = (ss / n).squareRoot()
-
-        // Рельєф живого обличчя: RMS-залишок від площини ≥ 5 мм
-        return rms >= 0.005
+        return (ss / n).squareRoot()
     }
 
     private static func makeImage(from pixelBuffer: CVPixelBuffer) -> UIImage? {

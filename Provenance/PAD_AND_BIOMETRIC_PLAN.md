@@ -26,6 +26,26 @@
 - exactly-one-face gate; server-bound random challenge (кивок/поворот);
 - temporal 3D consistency.
 
+### Готовий стенд вимірювання (DEBUG)
+
+Інструмент зібрано — лишається фізичний прогін:
+1. **DEBUG-збірка**: на екрані face-check зʼявляється оверлей
+   `PADCaptureOverlay` з перемикачем мітки (`bonafide` / `print` /
+   `screen` / `mask` / `other`).
+2. Оператор ставить мітку і пред'являє відповідний артефакт;
+   кожен кадр із виміряним depth-RMS пишеться у `Documents/pad_log.csv`
+   (`PADLogger`, той самий вимір, що й у бойовому gate).
+3. Зібрати достатньо кадрів кожного класу (≥ N на клас), вивантажити
+   CSV кнопкою «Export CSV».
+4. Порахувати: `python3 Tools/PADScore/pad_score.py pad_log.csv`
+   → APCER (на клас атаки), BPCER, свіп порога.
+5. Вписати APCER/BPCER сюди; за потреби відкалібрувати
+   `FaceLivenessManager.depthRMSThreshold` за свіпом.
+
+Очікування (клас, який depth реально закриває): print/screen APCER→0.
+Обʼємна маска — окремий, складніший клас; depth сам її не зупиняє,
+для неї потрібні challenge-response + матеріалознавчі ознаки (чесно).
+
 ## #9 — Face model provenance + FAR/FRR
 
 - **Provenance:** `Provenance/MODEL.md` фіксує SHA-256 моделі й спосіб
