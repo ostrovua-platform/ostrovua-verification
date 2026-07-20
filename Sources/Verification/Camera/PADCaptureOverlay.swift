@@ -7,12 +7,14 @@ import SwiftUI
 struct PADCaptureOverlay: View {
     @State private var label = "bonafide"
     @State private var showShare = false
+    @ObservedObject private var logger = PADLogger.shared
 
     private let labels = ["bonafide", "print", "screen", "mask", "other"]
 
     var body: some View {
         VStack(spacing: 8) {
-            Text("PAD capture (DEBUG)").font(.caption2).bold()
+            // Лічильник наживо — доказ, що НОВИЙ білд реально пише (v2).
+            Text("PAD capture v3 — кадрів: \(logger.count)").font(.caption2).bold()
             Picker("label", selection: $label) {
                 ForEach(labels, id: \.self) { Text($0).tag($0) }
             }
@@ -20,7 +22,7 @@ struct PADCaptureOverlay: View {
             .onChange(of: label) { _, new in PADLogger.shared.label = new }
 
             HStack {
-                Button("Export CSV") { showShare = true }
+                Button("Export pad_log_v3") { showShare = true }
                     .font(.caption2)
                 Button("Reset") { PADLogger.shared.reset() }
                     .font(.caption2).foregroundColor(.red)
