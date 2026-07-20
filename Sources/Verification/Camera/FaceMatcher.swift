@@ -26,9 +26,14 @@ struct FaceMatchResultDetail {
 /// в DEBUG-сборках для разработки без модели.
 enum FaceMatcher {
 
-    // Пороги косинусной близости для FaceNet-эмбеддингов
-    private static let embeddingMatch: Float = 0.60
-    private static let embeddingUncertain: Float = 0.45
+    // Пороги косинусної близості для FaceNet-ембеддингів.
+    // КАЛІБРОВАНО за виміряним ROC на LFW (Tools/FaceEval, 2026-07-20,
+    // AUC 0.987, EER 3.4%): на порозі 0.50 FAR≈0.13%, FRR≈6.7% —
+    // сильна безпека при вдвічі меншому хибному відхиленні, ніж 0.60
+    // (там FRR 14%). < 0.40 — впевнено «інша особа»; [0.40,0.50) —
+    // пограничне, пропонуємо повтор.
+    private static let embeddingMatch: Float = 0.50
+    private static let embeddingUncertain: Float = 0.40
 
     // Пороги дистанции VNFeaturePrint (fallback)
     private static let printMatch: Float = 0.85

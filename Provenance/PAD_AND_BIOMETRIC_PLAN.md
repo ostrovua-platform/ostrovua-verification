@@ -36,9 +36,11 @@
 - **Вихід:** таблиця FAR/FRR + ROC у цей файл; фіксація іменованого
   output-tensor і preprocessing-контракту в коді.
 
-Harness будується як CLI (Mac): вхід — теки пар зображень, вихід —
-CSV зі score + метрики. Побудова harness — код; ПРОГІН на датасеті й
-публікація чисел — окремий крок з реальними даними.
+**Harness ПОБУДОВАНО:** `Tools/FaceEval` (Swift CLI, macOS) —
+препроцесинг дослівно як у застосунку (FaceMatcher + FaceEmbedder),
+вхід LFW pairs.txt, вихід FAR/FRR/EER/AUC + ROC CSV. Інструкція —
+`Tools/FaceEval/README.md`. Лишається ПРОГІН на LFW з реальною
+моделлю (крок на Маку) і вставка чисел сюди.
 
 ## Статус
 
