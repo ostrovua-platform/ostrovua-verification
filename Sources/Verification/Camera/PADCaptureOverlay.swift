@@ -7,6 +7,7 @@ import SwiftUI
 struct PADCaptureOverlay: View {
     @State private var label = "bonafide"
     @State private var showShare = false
+    @State private var showChallenge = false
     @ObservedObject private var logger = PADLogger.shared
 
     private let labels = ["bonafide", "print", "screen", "mask", "other"]
@@ -27,7 +28,10 @@ struct PADCaptureOverlay: View {
                 Button("Reset") { PADLogger.shared.reset() }
                     .font(.caption2).foregroundColor(.red)
             }
+            Button("Active liveness (challenge)") { showChallenge = true }
+                .font(.caption2)
         }
+        .sheet(isPresented: $showChallenge) { ChallengeMeasureView() }
         .padding(8)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
         .padding(8)

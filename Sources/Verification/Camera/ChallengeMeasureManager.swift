@@ -1,0 +1,109 @@
+import Foundation
+import AVFoundation
+import Vision
+import Combine
+
+#if DEBUG
+/// DEBUG-менеджер вимірювання активної liveness (аудит #8). ОКРЕМА
+/// фронтальна камера + VNDetectFaceLandmarksRequest (поза yaw/pitch +
+/// очі для EAR). Production-флоу FaceLivenessManager НЕ чіпає — спершу
+/// міряємо челендж стендом, потім вирішуємо про інтеграцію.
+///
+/// Одна «попитка» = одна випадкова послідовність дій. Оператор ставить
+/// мітку (bonafide/photo/screen) і намагається пройти челендж живим
+/// обличчям або атакою; телеметрія → ChallengeLogger → challenge_score.py.
+final class ChallengeMeasureManager: NSObject, ObservableObject {
+    @Published private(set) var guidance: String = "Натисни «Нова попитка»"
+    @Published private(set) var passedText: String = ""
+
+    let session = AVCaptureSession()
+    private let output = AVCaptureVideoDataOutput()
+    private let queue = DispatchQueue(label: "ostrovua.challenge.measure")
+    private var challenge: ActiveLivenessChallenge?
+    private var running = false
+
+    func startSession() {
+        queue.async {
+            guard self.session.inputs.isEmpty else { self.session.startRunning(); return }
+            self.session.beginConfiguration()
+            self.session.sessionPreset = .medium
+            guard let dev = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
+                  let input = try? AVCaptureDeviceInput(device: dev),
+                  self.session.canAddInput(input) else {
+                DispatchQueue.main.async { self.guidance = "Камера недоступна" }; return
+            }
+            self.session.addInput(input)
+            self.output.setSampleBufferDelegate(self, queue: self.queue)
+            if self.session.canAddOutput(self.output) { self.session.addOutput(self.output) }
+            self.session.commitConfiguration()
+            self.session.startRunning()
+        }
+    }
+
+    func stopSession() { queue.async { self.session.stopRunning() } }
+
+    /// Нова попитка: генеруємо випадкову послідовність (тут — локальний
+    /// seed; у проді seed = серверний challenge для анти-реплею).
+    func newAttempt() {
+        var seed = Data(count: 16)
+        _ = seed.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
+        let c = ActiveLivenessChallenge(seed: seed, length: 3)
+        c.start()
+        challenge = c
+        running = true
+        DispatchQueue.main.async {
+            self.passedText = ""
+            self.guidance = "Послідовність: " + c.sequence.map { $0.rawValue }.joined(separator: " → ")
+        }
+    }
+}
+
+extension ChallengeMeasureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ o: AVCaptureOutput, didOutput sb: CMSampleBuffer, from c: AVCaptureConnection) {
+        guard running, let challenge, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
+
+        let req = VNDetectFaceLandmarksRequest { [weak self] req, _ in
+            guard let self, let face = (req.results as? [VNFaceObservation])?.first else { return }
+            let yaw = face.yaw?.doubleValue
+            let pitch = face.pitch?.doubleValue
+            let earL = ActiveLivenessChallenge.eyeAspectRatio(face.landmarks?.leftEye)
+            let earR = ActiveLivenessChallenge.eyeAspectRatio(face.landmarks?.rightEye)
+            let ear: Double? = {
+                switch (earL, earR) {
+                case let (l?, r?): return (l + r) / 2
+                case let (l?, nil): return l
+                case let (nil, r?): return r
+                default: return nil
+                }
+            }()
+
+            ChallengeLogger.shared.frame(state: self.stateName(challenge.state),
+                                         yaw: yaw, pitch: pitch, ear: ear)
+
+            let done = challenge.process(yaw: yaw, pitch: pitch, ear: ear)
+            DispatchQueue.main.async { self.guidance = challenge.guidance }
+
+            if done {
+                self.running = false
+                ChallengeLogger.shared.attemptFinished(passed: true)
+                DispatchQueue.main.async { self.passedText = "✓ ПРОЙДЕНО" }
+            } else if case .failed = challenge.state {
+                self.running = false
+                ChallengeLogger.shared.attemptFinished(passed: false)
+                DispatchQueue.main.async { self.passedText = "✗ не пройдено" }
+            }
+        }
+        try? VNImageRequestHandler(cvPixelBuffer: pb, orientation: .leftMirrored, options: [:]).perform([req])
+    }
+
+    private func stateName(_ s: ChallengeState) -> String {
+        switch s {
+        case .idle: return "idle"
+        case .awaitingNeutral(let i): return "neutral\(i)"
+        case .awaitingAction(let i): return "action\(i)"
+        case .passed: return "passed"
+        case .failed: return "failed"
+        }
+    }
+}
+#endif
