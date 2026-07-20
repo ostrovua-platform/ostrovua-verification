@@ -9,12 +9,13 @@ import Foundation
 /// DG1/DG2, які реально прочитав. Сервер перевіряє підпис за CSCA
 /// України і збіг хешів. Тут клієнту на слово не вірять.
 struct VerificationEvidence {
-    enum Outcome: String { case passed, failed, heuristic, depth }
+    enum Outcome: String { case passed, failed, depth }
 
     var method = "nfc_passport"
-    /// .depth — TrueDepth підтвердив обʼємність обличчя (анти-фото);
-    /// .heuristic — пристрій без TrueDepth, лише стабільне обличчя.
-    var liveness: Outcome = .heuristic
+    /// ЄДИНИЙ рівень: .depth — TrueDepth підтвердив обʼємність обличчя.
+    /// Евристичного рівня не існує: без TrueDepth флоу зупиняється
+    /// ще на клієнті (E-406), сервер такий payload відхиляє.
+    var liveness: Outcome = .depth
     var faceMatch: Outcome
     var faceModel: String                                // "coreml" | "vision_fallback"
     /// EF.SOD з чипа (base64 DER). Містить лише хеші DG, сертифікат

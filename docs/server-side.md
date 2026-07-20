@@ -22,7 +22,11 @@ if (method !== 'nfc_passport')                        return res.status(400).jso
 if (protocolVersion !== 3)                            return res.status(400).json({ error: '…' });
 if (endpoint !== '/auth/verify/approve')              return res.status(400).json({ error: '…' });
 if (faceMatch !== 'passed' || faceModel !== 'coreml') return res.status(400).json({ error: '…' });
-if (liveness !== 'depth' && liveness !== 'heuristic') return res.status(400).json({ error: '…' });
+// ПОЛІТИКА: єдиний рівень видачі — depth-backed strong.
+// Евристика Verified ID НЕ видає за жодних умов.
+if (liveness !== 'depth') {
+  return res.status(400).json({ error: 'Для верифікації потрібен пристрій з Face ID (TrueDepth).' });
+}
 if (typeof sod !== 'string' || sod.length === 0)      return res.status(400).json({ error: 'SOD обовʼязковий' });
 // … + перевірка форми dgHashes
 
@@ -51,33 +55,38 @@ if (existing?.contributor_id && existing.contributor_id !== contributorId)
 // (повна логіка — у продакшн-обробнику; без робочої дедуплікації
 // Verified ID не видається — 503)
 
-const level = liveness === 'depth' ? 'strong' : 'standard';
-const storedMethod = method + '+pa' + (liveness === 'depth' ? '+depth' : '');
+// Єдиний рівень: strong. Типізована колонка identity_assurance —
+// authorization boundary, а не парсинг method-рядка.
+const level = 'strong';
+const storedMethod = method + '+pa+depth';
 
-// 6. Запис у базу: прапорець, дата, метод. SOD НЕ зберігається —
+// 6. Запис у базу: прапорець, дата, метод, рівень. SOD НЕ зберігається —
 //    тимчасова тека видаляється одразу після перевірки.
 await hasuraAdmin(
-  `mutation($id: uuid!, $m: String!, $at: timestamptz!) {
+  `mutation($id: uuid!, $m: String!, $at: timestamptz!, $a: String!) {
      update_contributors_by_pk(pk_columns:{id:$id},
-       _set:{ verified:true, verified_at:$at, verification_method:$m }) { id }
+       _set:{ verified:true, verified_at:$at, verification_method:$m,
+              identity_assurance:$a }) { id }
    }`,
-  { id: contributorId, m: storedMethod, at: new Date().toISOString() }
+  { id: contributorId, m: storedMethod, at: new Date().toISOString(), a: level }
 );
 
 return res.json({ ok: true, verified: true, level, passiveAuthentication: pa.status });
 ```
 
-У таблиці `contributors` після верифікації зʼявляються три значення:
+У таблиці `contributors` після верифікації зʼявляються чотири значення:
 
 | Поле                  | Приклад                    |
 |-----------------------|----------------------------|
 | `verified`            | `true`                     |
-| `verified_at`         | `2026-07-19T12:00:00Z`     |
-| `verification_method` | `nfc_passport+pa`          |
+| `verified_at`         | `2026-07-20T12:00:00Z`     |
+| `verification_method` | `nfc_passport+pa+depth`    |
+| `identity_assurance`  | `strong`                   |
 
-`+pa` означає: справжність даних чипа доведена криптографічно
-(Passive Authentication за CSCA України). Без `+pa` — перехідний
-«basic»-рівень (див. режим `PA_ENFORCE` у threat-model.md).
+`+pa` — справжність даних чипа доведена криптографічно (Passive
+Authentication за запіненими CSCA України); `+depth` — жива
+присутність підтверджена мапою глибини TrueDepth. Інших рівнів
+видачі не існує: без PA або без depth верифікація не проходить.
 
 Полів для номера документа, імені з паспорта, дати народження,
 громадянства чи фото в схемі бази **не існує** — зберігати їх нікуди,

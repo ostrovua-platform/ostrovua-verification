@@ -21,7 +21,7 @@
 POST /auth/verify/approve   // тіло — канонічний payload, підписаний App Attest
 {
   "method": "nfc_passport",
-  "liveness": "heuristic",
+  "liveness": "depth",
   "faceMatch": "passed",
   "faceModel": "coreml",
   "sod": "<EF.SOD, base64>",
@@ -63,9 +63,10 @@ Authentication: підпис → DSC → CSCA України) і одразу в
 3. **Face check** (`Sources/Verification/Camera`) — звірка обличчя
    з фото з чипа: FaceNet (CoreML) рахує ембеддинги локально.
    Ніщо з цього не передається і не зберігається.
-   Liveness: на пристроях з TrueDepth кожен зарахований кадр
-   перевіряється мапою глибини (площина-фіт: фото/екран = відмова);
-   без TrueDepth — чесний режим `heuristic`, сервер це бачить.
+   Liveness: кожен зарахований кадр перевіряється мапою глибини
+   TrueDepth (площина-фіт: фото/екран = відмова). ЄДИНИЙ рівень
+   видачі: без TrueDepth (SE, до iPhone X) верифікація чесно
+   недоступна — сервер відхиляє все, крім `liveness: "depth"`.
    > **Обмеження.** Це реальний захист від фото і відео з екрана,
    > але НЕ сертифікований PAD (ISO 30107-3): обʼємна маска —
    > окремий трек. Див. threat-model.md.

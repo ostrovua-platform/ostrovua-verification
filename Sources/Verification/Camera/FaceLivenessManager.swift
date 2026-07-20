@@ -34,9 +34,10 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
     /// Остання мапа глибини (пишеться і читається на self.queue).
     private var latestDepth: AVDepthData?
 
-    /// Який режим liveness РЕАЛЬНО відпрацював — чесно йде на сервер:
-    /// "depth" (TrueDepth: площина = відмова) або "heuristic" (без депту).
-    private(set) var livenessMode: String = "heuristic"
+    /// Який режим liveness РЕАЛЬНО відпрацював. Політика: єдиний
+    /// рівень "depth" — без TrueDepth флоу зупиняється з E-406,
+    /// тож значення "none" ніколи не потрапляє в evidence.
+    private(set) var livenessMode: String = "none"
 
     func startCheck(completion: @escaping (Bool) -> Void) {
         self.completion = completion
@@ -175,7 +176,7 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
                 // пресети (.medium тощо) часто обирають відеоформат БЕЗ
                 // підтримки глибини — тому явно шукаємо формат з depth
                 // (класика TrueDepth — 640×480) і вмикаємо .inputPriority.
-                // На пристроях без TrueDepth (SE) — чесний "heuristic".
+                // Без TrueDepth верифікація НЕДОСТУПНА (guard нижче, E-406).
                 var depthReady = false
                 if device.deviceType == .builtInTrueDepthCamera,
                    self.session.canAddOutput(self.depthOutput) {
@@ -290,8 +291,8 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
         if detectedFrameCount >= 12 {
             session.stopRunning()
 
-            // Чесний режим для сервера: що РЕАЛЬНО перевірено
-            livenessMode = depthSupported ? "depth" : "heuristic"
+            // Сюди можливо дійти лише з working depth (guard у configureCamera)
+            livenessMode = "depth"
 
             // Сохраняем кадр лица для сверки с фото из чипа (DG2)
             let faceImage = pixelBuffer.flatMap { Self.makeImage(from: $0) }
