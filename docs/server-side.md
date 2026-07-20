@@ -13,33 +13,30 @@
 const okAttest = await verifyDeviceAttestation(req, contributorId);
 if (!okAttest) return res.status(403).json({ error: 'Device attestation required' });
 
-// 3. Тіло: enum-результати + SOD + хеші DG. ЖОДНОГО поля документа.
-const { method, session, liveness, faceMatch, faceModel, sod, dgHashes } = req.body || {};
+// 3. СТРОГА СХЕМА: кожне поле — whitelist, невідоме значення = 400.
+//    ЖОДНОГО поля документа в тілі немає.
+const { method, session, liveness, faceMatch, faceModel, sod, dgHashes,
+        protocolVersion, endpoint } = req.body || {};
 
-const ALLOWED_METHODS = ['nfc_passport'];
-if (!ALLOWED_METHODS.includes(method)) return res.status(400).json({ error: '…' });
-if (faceMatch !== 'passed')            return res.status(400).json({ error: '…' });
+if (method !== 'nfc_passport')                        return res.status(400).json({ error: '…' });
+if (protocolVersion !== 3)                            return res.status(400).json({ error: '…' });
+if (endpoint !== '/auth/verify/approve')              return res.status(400).json({ error: '…' });
+if (faceMatch !== 'passed' || faceModel !== 'coreml') return res.status(400).json({ error: '…' });
+if (liveness !== 'depth' && liveness !== 'heuristic') return res.status(400).json({ error: '…' });
+if (typeof sod !== 'string' || sod.length === 0)      return res.status(400).json({ error: 'SOD обовʼязковий' });
+// … + перевірка форми dgHashes
 
-// 4. Passive Authentication (ICAO 9303): сервер САМ перевіряє
-//    підпис держави над даними чипа — клієнту не вірить на слово.
-//    Див. Server/passiveauth.js: цілісність CMS-підпису → звірка
-//    хешів DG1/DG2 з підписаними в SOD → ланцюжок DSC → CSCA України.
-let pa = { status: 'failed', reason: 'sod_missing' };
-if (typeof sod === 'string' && sod.length > 0) {
-  pa = passiveauth.verifySOD({ sodBase64: sod, dgHashes });
+// 4. Passive Authentication — ОБОВʼЯЗКОВА. «Basic»-видачі без PA
+//    не існує: немає криптодоказу справжності документа — немає
+//    Verified ID. Період розкатки завершено.
+const pa = await passiveauth.verifySOD({ sodBase64: sod, dgHashes });
+if (pa.status !== 'passed') {
+  return res.status(pa.status === 'unavailable' ? 503 : 400)
+            .json({ error: 'Документ не пройшов криптографічну перевірку справжності' });
 }
 
-// Підроблений/битий SOD чи розбіжність хешів — відмова ЗАВЖДИ.
-const HARD_FAIL = ['sod_malformed', 'cms_signature_invalid', 'lds_parse_failed',
-                   'dg_hash_mismatch', 'issuer_not_ukraine'];
-if (pa.status === 'failed' && HARD_FAIL.includes(pa.reason)) {
-  return res.status(400).json({ error: 'Документ не пройшов криптографічну перевірку справжності' });
-}
-// PA_ENFORCE=1: без пройденої PA верифікації немає (жорсткий режим).
-if (PA_ENFORCE && pa.status !== 'passed') return res.status(400).json({ error: '…' });
-
-const paPassed = pa.status === 'passed';
-const storedMethod = paPassed ? method + '+pa' : method;   // чесна позначка в базі
+const level = liveness === 'depth' ? 'strong' : 'standard';
+const storedMethod = method + '+pa' + (liveness === 'depth' ? '+depth' : '');
 
 // 5. Запис у базу: прапорець, дата, метод. SOD НЕ зберігається —
 //    тимчасова тека видаляється одразу після перевірки.
@@ -70,7 +67,14 @@ return res.json({ ok: true, verified: true, level: paPassed ? 'strong' : 'basic'
 Полів для номера документа, імені з паспорта, дати народження,
 громадянства чи фото в схемі бази **не існує** — зберігати їх нікуди,
 навіть якби застосунок їх надіслав (а він не надсилає). SOD після
-перевірки видаляється; його хеші в базу не пишуться.
+перевірки видаляється.
+
+Додатково зберігається **токен документа** (`document_tokens`):
+`HMAC-SHA256(секретний pepper, хеш DG1 із SOD)` — односторонній,
+без жодного персонального поля. Призначення: «один паспорт = один
+акаунт» і бан документа за порушення правил. Відновити з токена
+дані документа неможливо; pepper зберігається поза базою.
+Деталі і чесні межі — threat-model.md.
 
 ## CSCA masterlist
 

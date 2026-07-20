@@ -149,6 +149,13 @@ struct PassportMRZ: Equatable {
             return nil
         }
 
+        // Строгий алфавіт MRZ: лише A-Z, 0-9 та '<' (аудит P1-08 —
+        // computeCheckDigit мапив невідомі символи в 0, тож рядок
+        // з нелегальними символами міг пройти чек-цифри).
+        guard line.range(of: "^[A-Z0-9<]{44}$", options: .regularExpression) != nil else {
+            return nil
+        }
+
         let chars = Array(line)
 
         let docNumberRaw = String(chars[0..<9])
@@ -158,7 +165,15 @@ struct PassportMRZ: Equatable {
         let birthCheck = chars[19]
         let expiry = String(chars[21..<27])
         let expiryCheck = chars[27]
+        let sex = chars[20]
+        let personalNumber = String(chars[28..<42])
+        let personalCheck = chars[42]
         let compositeCheck = chars[43]
+
+        // Стать: лише M / F / < (ICAO 9303)
+        guard sex == "M" || sex == "F" || sex == "<" else {
+            return nil
+        }
 
         // Композитна чек-цифра TD3: над номером+чек, датою нар.+чек,
         // терміном+чек і персональним номером(28–42)+чек(42).
@@ -167,10 +182,20 @@ struct PassportMRZ: Equatable {
             + expiry + String(expiryCheck)
             + String(chars[28..<43])
 
+        // Чек-цифра персонального номера (поз. 42): для порожнього
+        // поля (всі '<') ICAO дозволяє '<' або '0'.
+        let personalCheckOK: Bool
+        if personalNumber.allSatisfy({ $0 == "<" }) {
+            personalCheckOK = personalCheck == "<" || personalCheck == "0"
+        } else {
+            personalCheckOK = verifyCheckDigit(personalNumber, expected: personalCheck)
+        }
+
         guard
             verifyCheckDigit(docNumberRaw, expected: docCheck),
             verifyCheckDigit(birth, expected: birthCheck),
             verifyCheckDigit(expiry, expected: expiryCheck),
+            personalCheckOK,
             verifyCheckDigit(composite, expected: compositeCheck)
         else {
             return nil

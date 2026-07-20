@@ -12,15 +12,19 @@ import DeviceCheck
 //  ("Device attestation required") — саме так і має бути:
 //  статус Verified ID неможливо отримати в обхід застосунку.
 //
-//  Протокол (backend/auth/server.js + appattest.js):
+//  Протокол (backend/auth/server.js + appattest.js, protocolVersion 3):
 //    1) POST /auth/verify/challenge            → {challengeId, challenge}
 //    2) POST /auth/verify/attest-key           → реєстрація ключа пристрою
 //       body {challengeId, keyId, attestation}
 //    3) POST /auth/verify/approve
 //       headers x-app-attest: <assertion b64>, x-attest-key: <keyId>
-//       body    {method, challengeId}
+//       body    = КАНОНІЧНИЙ JSON (sortedKeys) з усіма доказами:
+//       {method, liveness, faceMatch, faceModel, sod, dgHashes,
+//        protocolVersion, endpoint, challengeId}
 //
-//  clientDataHash = SHA256(challenge) — рівно так рахує сервер.
+//  clientDataHash = SHA256(challenge ‖ canonicalPayload) — assertion
+//  привʼязаний до ВСЬОГО payload; сервер рахує так само і звіряє
+//  байти тіла запиту дослівно.
 // ═══════════════════════════════════════════════════════════════════
 
 enum AppAttestError: LocalizedError {

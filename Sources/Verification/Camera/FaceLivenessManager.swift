@@ -171,37 +171,51 @@ final class FaceLivenessManager: NSObject, ObservableObject, @unchecked Sendable
                 self.session.addOutput(self.videoOutput)
 
                 // ── TrueDepth: реальна перевірка обʼємності (анти-фото) ──
-                // Мапа глибини з того ж сенсора, що й Face ID. Плоске
-                // фото/екран не має рельєфу обличчя — такі кадри не
-                // зараховуються. На пристроях без TrueDepth (SE) —
-                // чесний режим "heuristic", сервер це бачить.
+                // Мапа глибини з того ж сенсора, що й Face ID. ВАЖЛИВО:
+                // пресети (.medium тощо) часто обирають відеоформат БЕЗ
+                // підтримки глибини — тому явно шукаємо формат з depth
+                // (класика TrueDepth — 640×480) і вмикаємо .inputPriority.
+                // На пристроях без TrueDepth (SE) — чесний "heuristic".
                 var depthReady = false
                 if device.deviceType == .builtInTrueDepthCamera,
                    self.session.canAddOutput(self.depthOutput) {
-                    self.session.addOutput(self.depthOutput)
-                    self.depthOutput.isFilteringEnabled = true
-                    self.depthOutput.setDelegate(self, callbackQueue: self.queue)
 
-                    let depthFormats = device.activeFormat.supportedDepthDataFormats.filter {
-                        let subtype = CMFormatDescriptionGetMediaSubType($0.formatDescription)
-                        return subtype == kCVPixelFormatType_DepthFloat16
-                            || subtype == kCVPixelFormatType_DepthFloat32
-                    }
-                    if let best = depthFormats.max(by: {
-                        CMVideoFormatDescriptionGetDimensions($0.formatDescription).width
-                            < CMVideoFormatDescriptionGetDimensions($1.formatDescription).width
-                    }) {
-                        do {
-                            try device.lockForConfiguration()
-                            device.activeDepthDataFormat = best
-                            device.unlockForConfiguration()
-                            depthReady = true
-                        } catch {
-                            depthReady = false
+                    func depthFormats(of format: AVCaptureDevice.Format) -> [AVCaptureDevice.Format] {
+                        format.supportedDepthDataFormats.filter {
+                            let subtype = CMFormatDescriptionGetMediaSubType($0.formatDescription)
+                            return subtype == kCVPixelFormatType_DepthFloat16
+                                || subtype == kCVPixelFormatType_DepthFloat32
                         }
                     }
-                    if depthReady == false {
-                        self.session.removeOutput(self.depthOutput)
+
+                    // Відеоформат з глибиною, ближчий до 640 px по ширині
+                    let candidates = device.formats.filter { depthFormats(of: $0).isEmpty == false }
+                    let videoFormat = candidates.min { a, b in
+                        let wa = CMVideoFormatDescriptionGetDimensions(a.formatDescription).width
+                        let wb = CMVideoFormatDescriptionGetDimensions(b.formatDescription).width
+                        return abs(wa - 640) < abs(wb - 640)
+                    }
+
+                    if let videoFormat,
+                       let depthFormat = depthFormats(of: videoFormat).max(by: {
+                           CMVideoFormatDescriptionGetDimensions($0.formatDescription).width
+                               < CMVideoFormatDescriptionGetDimensions($1.formatDescription).width
+                       }) {
+                        do {
+                            self.session.sessionPreset = .inputPriority
+                            try device.lockForConfiguration()
+                            device.activeFormat = videoFormat
+                            device.activeDepthDataFormat = depthFormat
+                            device.unlockForConfiguration()
+
+                            self.session.addOutput(self.depthOutput)
+                            self.depthOutput.isFilteringEnabled = true
+                            self.depthOutput.setDelegate(self, callbackQueue: self.queue)
+                            depthReady = true
+                        } catch {
+                            self.session.sessionPreset = .medium
+                            depthReady = false
+                        }
                     }
                 }
                 self.depthSupported = depthReady

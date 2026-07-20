@@ -49,10 +49,11 @@ grep -rn "chipPhoto\|passportImage" Sources
   `AuthStore`) і не збирається окремо. Мета — аудит, не переиспользование.
 - CoreML-модель ембеддингів обличчя (`FaceEmbedding.mlpackage`,
   конвертований FaceNet) у репозиторій не включена через розмір (45 МБ);
-  `FaceEmbedder.swift` показує, як вона використовується, з фолбеком
-  на Vision `VNFeaturePrint`.
+  її SHA-256 і спосіб перевірки — `Provenance/MODEL.md`. Fallback на
+  Vision `VNFeaturePrint` ЗАБОРОНЕНИЙ у release (DEBUG-only,
+  `FaceMatcher.swift`): без моделі верифікація не проходить.
 - Читання чипа — бібліотека [NFCPassportReader](https://github.com/AndyQ/NFCPassportReader)
-  (MIT), закріплена версія 2.3.2 (Package.resolved).
+  (MIT), версія закріплена у `Provenance/Package.resolved` (2.3.2).
 - Passive Authentication — реалізована СЕРВЕРНО: `Server/passiveauth.js`
   (перевірка підпису SOD, ланцюжок DSC→CSCA України, звірка хешів DG).
   Режим розкатки: `PA_ENFORCE=0` (лог) → `PA_ENFORCE=1` (жорстко).

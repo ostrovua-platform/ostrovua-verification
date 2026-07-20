@@ -19,10 +19,11 @@ struct FaceMatchResultDetail {
 /// Сверка лица с камеры с фото владельца из чипа документа (DG2).
 ///
 /// Пайплайн: детекция лица → выравнивание по линии глаз → кадрирование →
-/// сравнение. Если в бандл добавлена CoreML-модель «FaceEmbedding»
-/// (FaceNet/ArcFace, см. Tools/convert_face_model.py) — сравнение идёт
-/// по косинусу face-эмбеддингов (высокая точность). Иначе — fallback
-/// на VNFeaturePrint (грубее, но работает из коробки).
+/// сравнение по косинусу face-эмбеддингов CoreML-модели «FaceEmbedding»
+/// (FaceNet, см. Tools/convert_face_model.py; hash — Provenance/MODEL.md).
+/// В RELEASE модель ОБЯЗАТЕЛЬНА: без неё верификация падает с
+/// modelUnavailable. Fallback на VNFeaturePrint существует только
+/// в DEBUG-сборках для разработки без модели.
 enum FaceMatcher {
 
     // Пороги косинусной близости для FaceNet-эмбеддингов
