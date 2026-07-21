@@ -4,8 +4,19 @@ import Foundation
 /// дозволяв безглузді комбінації (`liveness: .passed`). Тепер тип
 /// кодує саме ту політику, яку заявляє: liveness = лише TrueDepth,
 /// faceMatch = лише «збіглось». Невалідну комбінацію не скомпілювати.
-enum LivenessEvidence: String { case trueDepthV1 = "depth" }
+enum LivenessEvidence: String {
+    case trueDepthV1 = "depth"
+    case activeChallengeV1 = "active"   // challenge-response (measured PAD)
+}
 enum FaceMatchEvidence: String { case passed }
+
+/// Непідробний-на-рівні-типу доказ активної liveness: створюється ЛИШЕ
+/// ChallengeLivenessManager після пройденого challenge-response.
+struct ActiveLivenessProof {
+    let mode: LivenessEvidence
+    fileprivate init() { self.mode = .activeChallengeV1 }
+    static func makeVerified() -> ActiveLivenessProof { ActiveLivenessProof() }
+}
 
 /// Непідробний-на-рівні-типу доказ живої присутності: створюється
 /// ЛИШЕ FaceLivenessManager після реальної depth-перевірки (F7).
@@ -24,24 +35,46 @@ struct VerificationEvidence {
     /// нього флоу зупиняється ще на клієнті (E-406).
     let liveness: LivenessEvidence
     let faceMatch: FaceMatchEvidence
+    /// Активна liveness (challenge-response): id серверного nonce, з
+    /// якого виведено послідовність дій — анти-реплей. Сервер звіряє,
+    /// що челендж було видано цьому користувачу й свіжий.
+    var activeLivenessChallengeId: String?
     var faceModel: String                                // лише "coreml" у release
     /// EF.SOD з чипа (base64 DER). Містить лише хеші DG, сертифікат
     /// і підпис — жодного персонального поля документа.
     var sodBase64: String?
     /// Хеші прочитаних груп даних: "dg1"/"dg2" → алгоритм → hex.
     var dgHashes: [String: [String: String]] = [:]
-    var protocolVersion = 3
+    var protocolVersion = 4
 
     /// Створюється лише з типізованих доказів етапів — сирі рядки
     /// сюди не потрапляють.
     init(livenessProof: DepthLivenessProof,
          faceMatch: FaceMatchEvidence,
          faceModel: String,
+         activeLivenessChallengeId: String?,
          sodBase64: String?,
          dgHashes: [String: [String: String]]) {
         self.liveness = livenessProof.mode
         self.faceMatch = faceMatch
         self.faceModel = faceModel
+        self.activeLivenessChallengeId = activeLivenessChallengeId
+        self.sodBase64 = sodBase64
+        self.dgHashes = dgHashes
+    }
+
+    /// Об'єднаний флоу: liveness доведено challenge-response (активна),
+    /// а не depth. Ключова гарантія — саме активна liveness.
+    init(activeProof: ActiveLivenessProof,
+         faceMatch: FaceMatchEvidence,
+         faceModel: String,
+         activeLivenessChallengeId: String?,
+         sodBase64: String?,
+         dgHashes: [String: [String: String]]) {
+        self.liveness = activeProof.mode
+        self.faceMatch = faceMatch
+        self.faceModel = faceModel
+        self.activeLivenessChallengeId = activeLivenessChallengeId
         self.sodBase64 = sodBase64
         self.dgHashes = dgHashes
     }
@@ -64,6 +97,8 @@ enum VerifyService {
             "liveness": evidence.liveness.rawValue,
             "faceMatch": evidence.faceMatch.rawValue,
             "faceModel": evidence.faceModel,
+            "activeLiveness": "passed",
+            "activeLivenessChallengeId": evidence.activeLivenessChallengeId ?? "",
             "protocolVersion": evidence.protocolVersion,
             "endpoint": "/auth/verify/approve"
         ]

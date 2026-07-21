@@ -63,11 +63,23 @@ extension ChallengeMeasureManager: AVCaptureVideoDataOutputSampleBufferDelegate 
         guard running, let challenge, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
 
         let req = VNDetectFaceLandmarksRequest { [weak self] req, _ in
-            guard let self, let face = (req.results as? [VNFaceObservation])?.first else { return }
-            let yaw = face.yaw?.doubleValue
-            let pitch = face.pitch?.doubleValue
-            let earL = ActiveLivenessChallenge.eyeAspectRatio(face.landmarks?.leftEye)
-            let earR = ActiveLivenessChallenge.eyeAspectRatio(face.landmarks?.rightEye)
+            guard let self else { return }
+            guard let face = (req.results as? [VNFaceObservation])?.first else {
+                // Немає обличчя — все одно рухаємо таймаут попитки.
+                if challenge.process(horiz: nil, ear: nil) == false,
+                   case .failed = challenge.state {
+                    self.running = false
+                    ChallengeLogger.shared.attemptFinished(passed: false)
+                    DispatchQueue.main.async { self.passedText = "✗ не пройдено" }
+                }
+                return
+            }
+            let lm = face.landmarks
+            // Позу рахуємо з геометрії лендмарок (Vision yaw/pitch грубі/nil).
+            let horiz = ActiveLivenessChallenge.horizontalNoseOffset(
+                nose: lm?.nose, leftEye: lm?.leftEye, rightEye: lm?.rightEye)
+            let earL = ActiveLivenessChallenge.eyeAspectRatio(lm?.leftEye)
+            let earR = ActiveLivenessChallenge.eyeAspectRatio(lm?.rightEye)
             let ear: Double? = {
                 switch (earL, earR) {
                 case let (l?, r?): return (l + r) / 2
@@ -77,10 +89,11 @@ extension ChallengeMeasureManager: AVCaptureVideoDataOutputSampleBufferDelegate 
                 }
             }()
 
+            // У колонку yaw пишемо horiz (для калібрування), pitch не використовуємо.
             ChallengeLogger.shared.frame(state: self.stateName(challenge.state),
-                                         yaw: yaw, pitch: pitch, ear: ear)
+                                         yaw: horiz, pitch: nil, ear: ear)
 
-            let done = challenge.process(yaw: yaw, pitch: pitch, ear: ear)
+            let done = challenge.process(horiz: horiz, ear: ear)
             DispatchQueue.main.async { self.guidance = challenge.guidance }
 
             if done {

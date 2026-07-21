@@ -11,6 +11,9 @@ struct VerificationView: View {
     @StateObject private var viewModel = VerificationViewModel()
     @StateObject private var nfcManager = NFCVerificationManager()
     @StateObject private var faceManager = FaceLivenessManager()
+    @StateObject private var challengeManager = ChallengeLivenessManager()
+    @State private var activeLivenessChallengeId: String?
+    @State private var challengeError: String?
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -19,6 +22,7 @@ struct VerificationView: View {
         case mrz           // Крок 2 з 4
         case nfc           // Крок 3 з 4
         case nfcError
+        case challenge     // активна liveness (перед звіркою обличчя)
         case face          // Крок 4 з 4
         case success
         case profileSetup  // ник + фото (добровольно)
@@ -67,8 +71,16 @@ struct VerificationView: View {
                 nfcScreen
             case .nfcError:
                 nfcErrorScreen
+            case .challenge:
+                challengeScreen
             case .face:
+                #if DEBUG
+                faceScreen.overlay(alignment: .top) {
+                    PADCaptureOverlay().padding(.top, 90)
+                }
+                #else
                 faceScreen
+                #endif
             case .success:
                 successScreen
             case .profileSetup:
@@ -91,10 +103,14 @@ struct VerificationView: View {
             if newScreen != .mrz {
                 mrzScanner.stop()
             }
+            if newScreen != .challenge {
+                challengeManager.stop()
+            }
         }
         .onDisappear {
             faceManager.stop()
             mrzScanner.stop()
+            challengeManager.stop()
             nfcManager.reset()
             wipeSensitiveData()
         }
@@ -566,7 +582,7 @@ struct VerificationView: View {
                     nfcManager.startScan(mrz: viewModel.mrz) { data in
                         if let data {
                             viewModel.passportData = data
-                            screen = .face
+                            screen = .challenge   // спершу активна liveness
                         } else {
                             screen = .nfcError
                         }
@@ -648,6 +664,118 @@ struct VerificationView: View {
     }
 
     // MARK: - Крок 4 з 4: face check
+
+    // Активна liveness (challenge-response) — перед звіркою обличчя.
+    // Послідовність дій виведена з СЕРВЕРНОГО nonce (анти-реплей).
+    private var challengeScreen: some View {
+        stepScaffold(step: 4, onBack: { screen = .nfc }) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Перевірка\nживої присутності")
+                    .font(.inter(26, .heavy))
+                    .foregroundStyle(palette.textPrimary)
+
+                Text(trs("Виконай дії на екрані — це підтверджує, що перед камерою жива людина, а не фото чи екран."))
+                    .font(.lufga(14, .light))
+                    .foregroundStyle(palette.textSecondary)
+                    .lineSpacing(3)
+
+                ZStack {
+                    Circle().fill(palette.surface).frame(width: 200, height: 200)
+                    MRZCameraPreview(session: challengeManager.session)
+                        .frame(width: 200, height: 200)
+                        .clipShape(Circle())
+                        .scaleEffect(x: -1, y: 1)
+                    Circle().stroke(palette.lime.opacity(0.4), lineWidth: 1).frame(width: 200, height: 200)
+                    FaceProgressRing(progress: challengeManager.progress, isActive: true)
+                }
+                .frame(maxWidth: .infinity)
+
+                Text(isMatchingFace ? trs("Звіряємо обличчя з фото з документа…") : challengeManager.guidance)
+                    .font(.inter(18, .bold))
+                    .foregroundStyle(palette.textPrimary)
+                    .frame(maxWidth: .infinity)
+                    .multilineTextAlignment(.center)
+
+                if let challengeError {
+                    Text(challengeError).font(.lufga(13)).foregroundStyle(palette.coral)
+                    Button {
+                        self.challengeError = nil
+                        startChallenge()
+                    } label: { VerifyCoralButtonLabel(title: trs("Спробувати ще раз")) }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .onAppear { startChallenge() }
+        .onChange(of: challengeManager.finished) { _, done in
+            guard done else { return }
+            if challengeManager.passed {
+                // Об'єднаний флоу: одразу звіряємо зняте обличчя з DG2,
+                // без окремого екрана FaceCheck.
+                runMatchAfterChallenge()
+            } else {
+                challengeError = challengeManager.guidance
+            }
+        }
+    }
+
+    /// Звірка знятого під час челенджу обличчя з фото з чипа (DG2).
+    private func runMatchAfterChallenge() {
+        guard let live = challengeManager.capturedFace,
+              let chip = nfcManager.chipPhoto else {
+            challengeError = trs("Не вдалося зняти обличчя. Спробуй ще раз.")
+            return
+        }
+        isMatchingFace = true
+        challengeError = nil
+        Task {
+            do {
+                let result = try await FaceMatcher.match(chipPhoto: chip, liveFace: live)
+                switch result.verdict {
+                case .match:
+                    let evidence = VerificationEvidence(
+                        activeProof: .makeVerified(),
+                        faceMatch: .passed,
+                        faceModel: result.model,
+                        activeLivenessChallengeId: activeLivenessChallengeId,
+                        sodBase64: nfcManager.chipSOD?.base64EncodedString(),
+                        dgHashes: nfcManager.dgHashes
+                    )
+                    let saved = await CurrentSession.shared.markVerified(evidence: evidence)
+                    await MainActor.run {
+                        isMatchingFace = false
+                        if saved { wipeSensitiveData(); screen = .success }
+                        else { challengeError = session.verifySyncError ?? trs("Сервер не підтвердив статус.") }
+                    }
+                case .uncertain(let s):
+                    await MainActor.run {
+                        isMatchingFace = false
+                        challengeError = "Не вдалося впевнено зіставити обличчя (схожість \(Int(s * 100))%). Спробуй ще раз при кращому освітленні."
+                    }
+                case .noMatch:
+                    await MainActor.run {
+                        isMatchingFace = false
+                        challengeError = trs("Обличчя не збігається з фото з чипа документа.")
+                    }
+                }
+            } catch {
+                await MainActor.run { isMatchingFace = false; challengeError = AppErrors.text(error) + " (E-401)" }
+            }
+        }
+    }
+
+    private func startChallenge() {
+        challengeError = nil
+        Task { @MainActor in
+            do {
+                let ch = try await AppAttestService.fetchChallenge()
+                activeLivenessChallengeId = ch.id
+                challengeManager.start(seed: ch.bytes) { _ in }   // результат — через @Published finished
+            } catch {
+                challengeError = AppErrors.text(error)
+            }
+        }
+    }
 
     private var faceScreen: some View {
         stepScaffold(step: 4, onBack: { screen = .nfc }) {
@@ -848,6 +976,7 @@ struct VerificationView: View {
                             livenessProof: livenessProof,
                             faceMatch: .passed,
                             faceModel: result.model,
+                            activeLivenessChallengeId: activeLivenessChallengeId,
                             sodBase64: nfcManager.chipSOD?.base64EncodedString(),
                             dgHashes: nfcManager.dgHashes
                         )

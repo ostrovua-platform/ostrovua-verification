@@ -148,6 +148,12 @@ enum AppAttestService {
 
     // MARK: - Кроки протоколу
 
+    /// Публічний запит серверного nonce для активної liveness (seed
+    /// послідовності челенджу). Той самий ендпоінт, окремий челендж.
+    static func fetchChallenge() async throws -> (id: String, bytes: Data) {
+        try await requestChallenge()
+    }
+
     private static func requestChallenge() async throws -> (id: String, bytes: Data) {
         guard let token = AuthStore.token else { throw APIError.notLoggedIn }
 
