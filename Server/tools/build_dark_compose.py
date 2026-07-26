@@ -12,6 +12,14 @@ import yaml
 
 
 DIGEST_IMAGE = re.compile(r"^[^\s@]+(?:/[^\s@]+)*@sha256:[0-9a-f]{64}$")
+AUTH_HEALTHCHECK_SCRIPT = (
+    'fetch("http://127.0.0.1:3001/auth/health")'
+    ".then(async (response) => {"
+    "const body = await response.json();"
+    "process.exit(response.status === 200 && body.ok === true ? 0 : 1);"
+    "})"
+    ".catch(() => process.exit(1));"
+)
 
 
 def fail(message: str) -> None:
@@ -125,6 +133,13 @@ def main() -> None:
     ]
     # Do not allow a legacy source compose file to override the image USER.
     auth["user"] = "12000:12000"
+    auth["healthcheck"] = {
+        "test": ["CMD", "node", "-e", AUTH_HEALTHCHECK_SCRIPT],
+        "interval": "30s",
+        "timeout": "5s",
+        "retries": 3,
+        "start_period": "15s",
+    }
 
     biometric_env = environment(biometric)
     biometric_env.update(

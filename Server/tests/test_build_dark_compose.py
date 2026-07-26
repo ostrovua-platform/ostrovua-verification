@@ -97,6 +97,18 @@ class DarkComposeBuilderTests(unittest.TestCase):
         self.assertEqual(
             biometric["environment"]["BIOMETRIC_CALIBRATION_APPROVED"], "0"
         )
+        self.assertEqual(
+            auth["healthcheck"]["test"][:3],
+            ["CMD", "node", "-e"],
+        )
+        self.assertIn(
+            "http://127.0.0.1:3001/auth/health",
+            auth["healthcheck"]["test"][3],
+        )
+        self.assertEqual(auth["healthcheck"]["interval"], "30s")
+        self.assertEqual(auth["healthcheck"]["timeout"], "5s")
+        self.assertEqual(auth["healthcheck"]["retries"], 3)
+        self.assertEqual(auth["healthcheck"]["start_period"], "15s")
 
 
 if __name__ == "__main__":

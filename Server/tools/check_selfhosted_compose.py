@@ -156,6 +156,22 @@ def main() -> None:
     require_secret_mount(biometric, "biometric_envelope_private.key")
     if str(auth.get("user", "")).lower() != "12000:12000":
         fail("auth service must run as the fixed image user 12000:12000")
+    auth_healthcheck = auth.get("healthcheck")
+    if not isinstance(auth_healthcheck, dict):
+        fail("auth service must define a Docker healthcheck")
+    health_test = auth_healthcheck.get("test")
+    if not isinstance(health_test, list) or len(health_test) != 4 or \
+       health_test[:3] != ["CMD", "node", "-e"]:
+        fail("auth healthcheck must use exec-form node without a shell")
+    health_script = str(health_test[3])
+    if "http://127.0.0.1:3001/auth/health" not in health_script or \
+       "body.ok === true" not in health_script:
+        fail("auth healthcheck must validate the loopback JSON health endpoint")
+    if auth_healthcheck.get("interval") != "30s" or \
+       auth_healthcheck.get("timeout") != "5s" or \
+       auth_healthcheck.get("start_period") != "15s" or \
+       int(auth_healthcheck.get("retries", 0)) != 3:
+        fail("auth healthcheck timing policy is invalid")
     for mount in auth.get("volumes", []):
         if not isinstance(mount, dict):
             continue
