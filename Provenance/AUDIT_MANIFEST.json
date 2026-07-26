@@ -7,7 +7,7 @@
     "sourceCommit": "d804b0a27a30fc034a33cc47599d105c69a852ed",
     "sourceCommitPurpose": "Enforce a fixed non-root auth runtime and freeze private registry release candidates",
     "iosSourceCommit": "6504f4f5c5fdaefb1618618d8dc4392ddf79fd72",
-    "documentationCommit": null
+    "documentationCommit": "47b8a08cf606f8af1e4da1d8ae6db13e4f803194"
   },
   "artifacts": [
     {
