@@ -28,6 +28,16 @@ class DarkComposeBuilderTests(unittest.TestCase):
                     "environment": {},
                     "networks": ["private"],
                 },
+                "redis": {
+                    "image": f"example/redis@{DIGEST}",
+                    "environment": {"REDIS_PASSWORD": "legacy-inline-value"},
+                    "command": [
+                        "redis-server",
+                        "--requirepass",
+                        "legacy-inline-value",
+                    ],
+                    "networks": ["private"],
+                },
                 "nginx": {
                     "image": f"example/nginx@{DIGEST}",
                     "environment": {},
@@ -71,6 +81,7 @@ class DarkComposeBuilderTests(unittest.TestCase):
 
         auth = result["services"]["auth"]
         biometric = result["services"]["biometric"]
+        redis = result["services"]["redis"]
         self.assertEqual(auth["user"], "12000:12000")
         self.assertIn(
             {"source": "biometric_hmac_auth", "target": "biometric_hmac.key"},
@@ -109,6 +120,28 @@ class DarkComposeBuilderTests(unittest.TestCase):
         self.assertEqual(auth["healthcheck"]["timeout"], "5s")
         self.assertEqual(auth["healthcheck"]["retries"], 3)
         self.assertEqual(auth["healthcheck"]["start_period"], "15s")
+        self.assertNotIn("REDIS_PASSWORD", redis["environment"])
+        self.assertEqual(
+            redis["command"],
+            ["redis-server", "/run/secrets/redis.conf"],
+        )
+        self.assertIn(
+            {"source": "redis_config", "target": "redis.conf"},
+            redis["secrets"],
+        )
+        self.assertEqual(redis["healthcheck"]["test"][0], "CMD-SHELL")
+        self.assertIn(
+            "/run/secrets/redis.conf",
+            redis["healthcheck"]["test"][1],
+        )
+        self.assertNotIn(
+            "legacy-inline-value",
+            json.dumps(redis),
+        )
+        self.assertEqual(
+            result["secrets"]["redis_config"]["file"],
+            "/etc/ostrovua/secrets/redis.conf",
+        )
 
 
 if __name__ == "__main__":

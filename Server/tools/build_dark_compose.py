@@ -20,6 +20,11 @@ AUTH_HEALTHCHECK_SCRIPT = (
     "})"
     ".catch(() => process.exit(1));"
 )
+REDIS_HEALTHCHECK_SCRIPT = (
+    'REDISCLI_AUTH="$$(sed -n \'s/^requirepass //p\' '
+    '/run/secrets/redis.conf)" '
+    "redis-cli ping | grep -qx PONG"
+)
 
 
 def fail(message: str) -> None:
@@ -83,8 +88,10 @@ def main() -> None:
 
     auth = services.get("auth")
     biometric = services.get("biometric")
-    if not isinstance(auth, dict) or not isinstance(biometric, dict):
-        fail("auth and biometric services are required")
+    redis = services.get("redis")
+    if not isinstance(auth, dict) or not isinstance(biometric, dict) or \
+       not isinstance(redis, dict):
+        fail("auth, biometric and redis services are required")
 
     auth_env = environment(auth)
     auth_env.update(
@@ -182,6 +189,20 @@ def main() -> None:
     biometric["memswap_limit"] = "2g"
     biometric["ulimits"] = {"core": {"soft": 0, "hard": 0}}
 
+    redis_env = environment(redis)
+    redis_env.pop("REDIS_PASSWORD", None)
+    redis["environment"] = redis_env
+    redis["command"] = ["redis-server", "/run/secrets/redis.conf"]
+    redis["secrets"] = [
+        secret_mount("redis_config", "redis.conf"),
+    ]
+    redis["healthcheck"] = {
+        "test": ["CMD-SHELL", REDIS_HEALTHCHECK_SCRIPT],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 3,
+    }
+
     config["secrets"] = {
         "doc_token_pepper_current": {
             "file": "/etc/ostrovua/secrets/doc_token_pepper.current"
@@ -212,6 +233,9 @@ def main() -> None:
         },
         "password_reset_pepper": {
             "file": "/etc/ostrovua/secrets/password_reset_pepper.key"
+        },
+        "redis_config": {
+            "file": "/etc/ostrovua/secrets/redis.conf"
         },
     }
 

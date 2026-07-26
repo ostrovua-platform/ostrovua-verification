@@ -16,6 +16,7 @@ INLINE_SECRETS = {
     "BIOMETRIC_ENVELOPE_PRIVATE_KEY",
     "BIOMETRIC_ENVELOPE_PUBLIC_KEY",
     "DOCUMENT_CA_SEALING_KEY",
+    "REDIS_PASSWORD",
 }
 
 
@@ -78,14 +79,17 @@ def main() -> None:
 
     services = config.get("services")
     networks = config.get("networks")
-    if not isinstance(services, dict) or not isinstance(networks, dict):
-        fail("canonical compose must contain service and network objects")
+    secrets = config.get("secrets")
+    if not isinstance(services, dict) or not isinstance(networks, dict) or \
+       not isinstance(secrets, dict):
+        fail("canonical compose must contain service, network and secret objects")
 
     auth_name = os.environ.get("AUTH_SERVICE", "auth")
     biometric_name = os.environ.get("BIOMETRIC_SERVICE", "biometric")
     edge_name = os.environ.get("PUBLIC_EDGE_SERVICE", "nginx")
     auth = require_service(services, auth_name)
     biometric = require_service(services, biometric_name)
+    redis = require_service(services, "redis")
     require_service(services, edge_name)
 
     auth_env = environment(auth)
@@ -154,6 +158,11 @@ def main() -> None:
     require_secret_mount(auth, "password_reset_pepper.key")
     require_secret_mount(biometric, "biometric_hmac.key")
     require_secret_mount(biometric, "biometric_envelope_private.key")
+    require_secret_mount(redis, "redis.conf")
+    redis_secret = secrets.get("redis_config")
+    if not isinstance(redis_secret, dict) or \
+       redis_secret.get("file") != "/etc/ostrovua/secrets/redis.conf":
+        fail("redis_config must resolve to the controlled host secret path")
     if str(auth.get("user", "")).lower() != "12000:12000":
         fail("auth service must run as the fixed image user 12000:12000")
     auth_healthcheck = auth.get("healthcheck")
@@ -172,6 +181,32 @@ def main() -> None:
        auth_healthcheck.get("start_period") != "15s" or \
        int(auth_healthcheck.get("retries", 0)) != 3:
         fail("auth healthcheck timing policy is invalid")
+    if redis.get("command") != ["redis-server", "/run/secrets/redis.conf"]:
+        fail("redis must load authentication from its Docker secret config")
+    redis_healthcheck = redis.get("healthcheck")
+    redis_health_test = redis_healthcheck.get("test") \
+        if isinstance(redis_healthcheck, dict) else None
+    if not isinstance(redis_health_test, list) or len(redis_health_test) != 2 or \
+       redis_health_test[0] != "CMD-SHELL":
+        fail("redis must define the fixed secret-backed healthcheck")
+    redis_health_script = str(redis_health_test[1])
+    if "REDISCLI_AUTH=" not in redis_health_script or \
+       "/run/secrets/redis.conf" not in redis_health_script or \
+       "redis-cli ping" not in redis_health_script or \
+       "--requirepass" in redis_health_script or "redis-cli -a" in \
+       redis_health_script:
+        fail("redis healthcheck must read authentication from its secret file")
+    if redis_healthcheck.get("interval") != "10s" or \
+       redis_healthcheck.get("timeout") != "5s" or \
+       int(redis_healthcheck.get("retries", 0)) != 3:
+        fail("redis healthcheck timing policy is invalid")
+    redis_networks = service_network_names(redis)
+    if not redis_networks:
+        fail("redis service has no internal network")
+    for name in redis_networks:
+        network = networks.get(name)
+        if not isinstance(network, dict) or network.get("internal") is not True:
+            fail(f"redis network {name!r} is not internal-only")
     for mount in auth.get("volumes", []):
         if not isinstance(mount, dict):
             continue
