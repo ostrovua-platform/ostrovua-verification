@@ -159,15 +159,15 @@ try {
   AUTH_RATE_LIMIT_PEPPER = loadFileBackedSecret('AUTH_RATE_LIMIT_PEPPER', {
     required: IS_PROD,
     minBytes: 32,
-  }) || 'development-only-auth-rate-limit-pepper';
+  });
   AUTH_SESSION_METADATA_PEPPER = loadFileBackedSecret('AUTH_SESSION_METADATA_PEPPER', {
     required: IS_PROD,
     minBytes: 32,
-  }) || 'development-only-session-metadata-pepper';
+  });
   PASSWORD_RESET_PEPPER = loadFileBackedSecret('PASSWORD_RESET_PEPPER', {
     required: IS_PROD,
     minBytes: 32,
-  }) || 'development-only-password-reset-pepper';
+  });
 
   if (process.env.DOCUMENT_CA_SEALING_KEY) {
     throw new Error('DOCUMENT_CA_SEALING_KEY: inline secrets are forbidden');
@@ -198,8 +198,8 @@ app.use(passport.initialize());
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const HASURA_URL       = process.env.HASURA_URL           || 'http://hasura:8080/v1/graphql';
-const ADMIN_SECRET     = process.env.HASURA_ADMIN_SECRET  || 'local_admin_secret';
-const JWT_SECRET       = process.env.JWT_SECRET           || 'ostrovua_local_jwt_secret_32chars!';
+const ADMIN_SECRET     = process.env.HASURA_ADMIN_SECRET  || '';
+const JWT_SECRET       = process.env.JWT_SECRET           || '';
 const JWT_EXPIRES      = process.env.JWT_EXPIRES          || '7d';
 const BCRYPT_ROUNDS    = parseInt(process.env.BCRYPT_ROUNDS || '12', 10);
 const PORT             = parseInt(process.env.PORT || '3001', 10);
@@ -210,9 +210,9 @@ const AUTH_SESSION_ENFORCEMENT_ENABLED =
 // ── FAIL-FAST: не стартуємо в проді з дефолтними/слабкими секретами ──────────────
 if (IS_PROD) {
   const bad = [];
-  if (!process.env.JWT_SECRET || JWT_SECRET.includes('ostrovua_local_jwt_secret')) bad.push('JWT_SECRET');
+  if (!JWT_SECRET) bad.push('JWT_SECRET');
   if (JWT_SECRET.length < 32) bad.push('JWT_SECRET (min 32 chars)');
-  if (!process.env.HASURA_ADMIN_SECRET || ADMIN_SECRET === 'local_admin_secret') bad.push('HASURA_ADMIN_SECRET');
+  if (!ADMIN_SECRET) bad.push('HASURA_ADMIN_SECRET');
   if (!process.env.ALLOWED_ORIGINS) bad.push('ALLOWED_ORIGINS');
   if (process.env.VERIFY_DEV_BYPASS === '1') bad.push('VERIFY_DEV_BYPASS must NOT be set in prod');
   if (bad.length) {
@@ -2620,7 +2620,7 @@ app.post('/auth/upload', rateLimit, async (req, res) => {
   }
 
   const base = process.env.PUBLIC_APP_URL || 'https://ostrovua.online';
-  console.log(`[upload] ${contributorId.slice(0, 8)}… → ${fname} (${Math.round(buf.length / 1024)} КБ)`);
+  console.log(`[upload] ${contributorId.slice(0, 8)}… accepted (${Math.round(buf.length / 1024)} КБ)`);
   return res.json({
     ok: true,
     url: `${base}/files/${fname}`,
@@ -2923,17 +2923,15 @@ async function notify(contributorId, { kind, title, body, targetId, saveHistory 
         data: { target_id: targetId || null, kind },
       });
 
-      // Мовчазний push — найгірше, що може бути: не видно, дійшов він чи ні.
-      // Тому пишемо в лог КОЖНУ спробу.
       console.log(
-        `[push] ${kind} → ${token.slice(0, 10)}… ` +
+        `[push] ${kind} ` +
         `${result.ok ? 'OK' : 'FAIL'} ` +
         `status=${result.status ?? '-'} reason=${result.reason ?? '-'} env=${environment || process.env.APNS_ENV}`
       );
 
       // Токен протух — прибираємо, щоб не слати в нікуди
       if (!result.ok && (result.reason === 'BadDeviceToken' || result.reason === 'Unregistered')) {
-        console.warn(`[push] токен видалено (${result.reason}): ${token.slice(0, 10)}…`);
+        console.warn(`[push] stale token removed (${result.reason})`);
         await hasuraAdmin(
           `mutation($t: String!) { delete_device_tokens_by_pk(token: $t) { token } }`,
           { t: token }

@@ -4,7 +4,30 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-Server/node_modules/
+node_modules/
+.build/
+build/
+dist/
+coverage/
+.pytest_cache/
+*.xcresult
+
+# Populated environment files are local-only. Commit examples, never values.
+.env
+.env.*
+!.env.example
+!.env.audit.example
+
+# Signing, private-key and runtime-secret material.
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.key
+RuntimeSecrets/
+secrets/
+
 # Local, reproducibility-only upstream checkout; production uses SHA-pinned
 # exported models plus the vendored Apache-2.0 license, not this 1 GB clone.
 Silent-Face-Anti-Spoofing/
