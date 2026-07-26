@@ -112,7 +112,7 @@ def main() -> None:
     auth["secrets"] = [
         secret_mount("doc_token_pepper_current", "doc_token_pepper_current"),
         secret_mount("doc_token_pepper_previous", "doc_token_pepper_previous"),
-        secret_mount("biometric_hmac", "biometric_hmac.key"),
+        secret_mount("biometric_hmac_auth", "biometric_hmac.key"),
         secret_mount(
             "biometric_envelope_public", "biometric_envelope_public.key"
         ),
@@ -149,7 +149,7 @@ def main() -> None:
         }
     ]
     biometric["secrets"] = [
-        secret_mount("biometric_hmac", "biometric_hmac.key"),
+        secret_mount("biometric_hmac_worker", "biometric_hmac.key"),
         secret_mount(
             "biometric_envelope_private", "biometric_envelope_private.key"
         ),
@@ -174,8 +174,11 @@ def main() -> None:
         "doc_token_pepper_previous": {
             "file": "/etc/ostrovua/secrets/doc_token_pepper.previous"
         },
-        "biometric_hmac": {
-            "file": "/etc/ostrovua/secrets/biometric_hmac.key"
+        "biometric_hmac_auth": {
+            "file": "/etc/ostrovua/secrets/biometric_hmac.auth.key"
+        },
+        "biometric_hmac_worker": {
+            "file": "/etc/ostrovua/secrets/biometric_hmac.worker.key"
         },
         "biometric_envelope_public": {
             "file": "/etc/ostrovua/secrets/biometric_envelope_public.key"
