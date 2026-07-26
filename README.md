@@ -107,7 +107,7 @@ docs/server-side.md     — серверний обробник: що саме �
 ## Ліцензія
 
 MIT — див. [LICENSE](LICENSE). Питання і аудит: issues цього репозиторію
-або borodkin0311@gmail.com.
+або support@ostrovua.net.
 
 ---
 
@@ -123,6 +123,7 @@ EF.SOD (state-signed data-group hashes + certificate — no personal
 fields) and DG1/DG2 hashes. The server performs ICAO 9303 Passive
 Authentication against the Ukrainian CSCA masterlist
 (`Server/passiveauth.js`), then discards the SOD; it stores
+
 `verified: true`, a timestamp and the method string, nothing else
 (see `docs/server-side.md`).
 
