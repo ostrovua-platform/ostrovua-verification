@@ -116,6 +116,27 @@ test('the production biometric image contains fail-closed replay and document-au
   assert.match(dockerfile, /replay_cache\.py/);
 });
 
+test('the production auth image runs as a fixed non-root user', () => {
+  const dockerfile = source('Dockerfile');
+  const userDeclaration = dockerfile.lastIndexOf('USER 12000:12000');
+  const commandDeclaration = dockerfile.lastIndexOf('CMD ["node", "server.js"]');
+
+  assert.match(
+    dockerfile,
+    /addgroup -S -g 12000 ostrovua-auth[\s\S]*adduser -S -D -H -u 12000 -G ostrovua-auth ostrovua-auth/
+  );
+  assert.match(dockerfile, /chown 12000:12000 \/app\/uploads/);
+  assert.ok(userDeclaration > 0, 'auth image must declare its runtime user');
+  assert.ok(
+    userDeclaration < commandDeclaration,
+    'the non-root user must apply to the runtime command'
+  );
+  assert.doesNotMatch(
+    dockerfile.slice(userDeclaration),
+    /USER\s+(?:0(?::0)?|root(?::root)?)\b/
+  );
+});
+
 test('DSC lookup material cannot become active-snapshot trust implicitly', () => {
   const passiveAuthentication = source('passiveauth.js');
 
