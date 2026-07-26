@@ -13,7 +13,8 @@ ALTER TABLE contributors ADD COLUMN IF NOT EXISTS verification_method TEXT;
 ALTER TABLE contributors ADD COLUMN IF NOT EXISTS banned              BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Типізований рівень доказовості (authorization boundary, аудит P0-01).
--- Політика: єдиний рівень видачі — 'strong' (PA + depth liveness).
+-- Protocol v7 записує strong лише через v7 activation function після
+-- server-side AA + biometric receipt. Passive/attested-CA створює review.
 ALTER TABLE contributors ADD COLUMN IF NOT EXISTS identity_assurance TEXT
     CHECK (identity_assurance IN ('strong') OR identity_assurance IS NULL);
 
@@ -63,3 +64,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_token_contributor
 -- Challenge App Attest — В ПАМʼЯТІ auth-процесу (TTL 5 хв, одноразові,
 -- ліміт на акаунт і глобальний). У базі не зберігаються за задумом:
 -- одноразовий секрет короткого життя, не персональні дані.
+
+-- Актуальні v7 assurance/review/receipt та fail-closed limiter:
+--   Server/migrations/20260724_document_assurance_v7.sql
+--   Server/migrations/20260724_verification_rate_limit_fail_closed.sql

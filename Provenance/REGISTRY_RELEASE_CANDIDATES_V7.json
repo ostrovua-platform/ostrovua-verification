@@ -1,0 +1,47 @@
+{
+  "schema": "ostrovua-registry-release-candidates-v1",
+  "generatedAt": "2026-07-26T08:49:30Z",
+  "sourceCommit": "d804b0a27a30fc034a33cc47599d105c69a852ed",
+  "repository": "docker.io/whoami33/ostrovua-release-candidates",
+  "visibility": "private",
+  "targetPlatform": "linux/amd64",
+  "images": {
+    "auth": {
+      "tag": "auth-v7-d804b0a2-amd64",
+      "reference": "docker.io/whoami33/ostrovua-release-candidates@sha256:4eaa5256cbb76c3cb3bb7358d61cfca091395e53b84330f6fea8504c9c257b63",
+      "indexDigest": "sha256:4eaa5256cbb76c3cb3bb7358d61cfca091395e53b84330f6fea8504c9c257b63",
+      "platformManifestDigest": "sha256:5f8d2f53013f7abfdf7ceb6ab3ebc9906472dc0515cbdb1d8f06ff89e61e95fa",
+      "attestationManifestDigest": "sha256:9c02e1689138ccc3d1e9b704e7c4d0df6a109aaa1bc72580f8d86d5e0e34bdd0",
+      "runtimeUser": "12000:12000",
+      "sizeBytes": 52913162
+    },
+    "biometric": {
+      "tag": "biometric-v7-d804b0a2-amd64",
+      "reference": "docker.io/whoami33/ostrovua-release-candidates@sha256:3f90e6e169c285c1ab6cd02d1ed4abb83bac9c5bfad7dcdbf3aab536f390c041",
+      "indexDigest": "sha256:3f90e6e169c285c1ab6cd02d1ed4abb83bac9c5bfad7dcdbf3aab536f390c041",
+      "platformManifestDigest": "sha256:38e2638beb0d62b08b5822a508645cebd3e9adccb1e6461db71585881d55cd61",
+      "attestationManifestDigest": "sha256:f33bd37bf26bd7b747aab947b8c15f8290819cce5adef6eb3c3f112b93c277df",
+      "runtimeUser": "12001:12001",
+      "sizeBytes": 552678719,
+      "modelSetHash": "291e044feb6c53e2ac9903094bcffd8a20519ef0ee1391c51c0c956ea771c0d0",
+      "calibrationApproved": false
+    }
+  },
+  "verification": {
+    "repositoryPrivate": true,
+    "unauthenticatedMetadataStatus": 404,
+    "pullByDigest": "passed",
+    "authRuntimeSmoke": "passed",
+    "biometricModelSmoke": {
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "nodeTests": {
+      "passed": 66,
+      "failed": 0
+    }
+  },
+  "deploymentPolicy": "Use only the digest-qualified reference field; tags are audit labels and are not deployment authority.",
+  "productionDeployed": false
+}
