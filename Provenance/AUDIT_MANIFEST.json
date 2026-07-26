@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-26T07:26:26Z",
+  "repository": "ostrovua-platform/ostrovua-verification",
+  "branch": "codex/release-freeze-v7-20260726",
+  "auditTarget": {
+    "sourceCommit": "05b1600b2e7bf6aafbaf8b43983f1105ec4443ab",
+    "sourceCommitPurpose": "Harden secret hygiene and clarify the server-authoritative verification boundary",
+    "iosSourceCommit": "6504f4f5c5fdaefb1618618d8dc4392ddf79fd72",
+    "documentationCommit": null
+  },
+  "artifacts": [
+    {
+      "path": "Server/package-lock.json",
+      "sha256": "8bb10a5ec01c3e78bf681568523ba374672bc8e948f2f48be5511002d8a1d227"
+    },
+    {
+      "path": "Server/biometric_service/requirements.txt",
+      "sha256": "2864a0f57b63921677cdbfe10b90616769f45abbbbb43ecb5479a4ea8925832d"
+    },
+    {
+      "path": "Server/biometric_service/model_manifest.json",
+      "sha256": "6c6f2b36b138e510ae8e95e233e03308e9a7ff3184f6b9c1e6942ecd791a057e"
+    },
+    {
+      "path": "Server/Dockerfile",
+      "sha256": "ec256a41c1c9957e1a82e8ba1dc0d6212cbbfbf35fcc996ad2a460d82196ab1a"
+    },
+    {
+      "path": "Server/biometric_service/Dockerfile",
+      "sha256": "2197d60116eacd5dc79edad289e0a5e1a9b3c857c859ec8df7220102bc27e7ae"
+    },
+    {
+      "path": "docs/threat-model.md",
+      "sha256": "8f83e9867dec8d6fc3bfb591100128680960ffef7d448bab9874b1ae861bbb0e"
+    },
+    {
+      "path": "Provenance/PRODUCTION_RELEASE_GATE_V7.md",
+      "sha256": "e88dfe753b8321a0606c838134e13acc20482d062e5a147a95b17fdfe2ba6e1b"
+    },
+    {
+      "path": "Server/.env.example",
+      "sha256": "9eb2936a6efcfc086117f8782c50d54f976ee0236c02740198e7c9d794dfdf41"
+    }
+  ],
+  "models": [
+    {
+      "path": "face_landmarker.task",
+      "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff"
+    },
+    {
+      "path": "minifas_v1se_4_0.onnx",
+      "sha256": "3d83e0966d3219b68192f1940d1f2dd7421e4ad9c4620259a8654e6c1366021a"
+    },
+    {
+      "path": "minifas_v2_2_7.onnx",
+      "sha256": "19a7599b74c27416f1f153a5a7159eda9f046a720f2ec251f39926921f555a87"
+    },
+    {
+      "path": "sface.onnx",
+      "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"
+    },
+    {
+      "path": "yunet.onnx",
+      "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+    }
+  ],
+  "dependencies": {
+    "node": {
+      "bcrypt": "^6.0.0",
+      "cbor": "^9.0.2",
+      "cors": "2.8.5",
+      "express": "4.18.2",
+      "jsonwebtoken": "9.0.2",
+      "node-fetch": "2.7.0",
+      "passport": "0.7.0",
+      "passport-github2": "0.1.12",
+      "passport-google-oauth20": "2.0.0"
+    },
+    "python": {
+      "Flask": "3.1.2",
+      "cryptography": "46.0.6",
+      "gunicorn": "23.0.0",
+      "mediapipe": "0.10.21",
+      "numpy": "1.26.4",
+      "onnxruntime": "1.20.1",
+      "opencv-contrib-python": "4.11.0.86",
+      "Pillow": "11.3.0"
+    }
+  },
+  "observedProductionSnapshot": {
+    "date": "2026-07-26",
+    "provenanceLimit": "Read-only runtime observation; images had no registry RepoDigest and are not proven to correspond to the audit source commit",
+    "composeFiles": [
+      {
+        "path": "/opt/ostrovua/backend/docker-compose.dark-v8.yml",
+        "sha256": "5dc37085b4e1818303f6b70a90517f58c47d36e97018892b09667f213b62df1f"
+      },
+      {
+        "path": "/opt/ostrovua/backend/docker-compose.yml",
+        "sha256": "72393e260a468a5714184bc5fa0333b141daa9c3a27cffee8a64fd23e7b739c3"
+      }
+    ],
+    "imageIds": {
+      "hasura": "sha256:07b1c1c723833e8a6d6bb300de496037d6dda25cf62a86b857f6312dd2139d43",
+      "nginx": "sha256:516475cc129da42866742567714ddc681e5eed7b9ee0b9e9c015e464b4221a00",
+      "auth": "sha256:0fd4316299ba91814e0ac22a01788f9467bbe4e458ed6a547c1b3c657848c95b",
+      "biometric": "sha256:88b2ae61379dffa2226695292b070ea2eeb1afedfbd466f7f1e8dd01c1e55e07",
+      "coturn": "sha256:e2bca2f79a4269d7240de5872ab60a9305013ad37296d2acf14f9510874346be",
+      "livekit": "sha256:27d72fa264baa4db4e635b3b6df12d185b4a95fee5f2ddce03e06d150d599e0e",
+      "pgbouncer": "sha256:4c1ca296ef525f108f5d3552cc337c0c09587cf8dae7f0067fd93349e47dc1cd",
+      "postgres": "sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb",
+      "redis": "sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99",
+      "certbot": "sha256:0107d084c225631fc64a8313e19adb07275f7296fde338f7dfa93986c80b2e3e"
+    },
+    "featureFlags": {
+      "auth": {
+        "AUTH_SESSION_ENFORCEMENT_ENABLED": 0,
+        "SERVER_OWNED_CA_ENABLED": 0,
+        "BIOMETRIC_SHADOW_MODE_ENABLED": 0,
+        "SELF_HOSTED_VERIFICATION_ENABLED": 0,
+        "BIOMETRIC_CALIBRATION_APPROVED": 0
+      },
+      "biometric": {
+        "BIOMETRIC_CALIBRATION_APPROVED": 0
+      }
+    },
+    "biometricIsolation": {
+      "readOnlyRootFilesystem": true,
+      "capDropAll": true,
+      "noNewPrivileges": true,
+      "pidsLimit": 64,
+      "memoryLimitBytes": 2147483648,
+      "publishedPorts": [],
+      "secretMountsReadOnly": true
+    },
+    "residualRuntimeRisks": [
+      "Auth root filesystem was not read-only and default capabilities remained",
+      "Some auth secrets were supplied as inline environment variables",
+      "Runtime images were locally tagged and had no immutable registry RepoDigest"
+    ]
+  },
+  "verification": {
+    "nodeTests": {
+      "passed": 65,
+      "failed": 0
+    },
+    "pythonBiometricTests": {
+      "passed": 43,
+      "failed": 0,
+      "skipped": 2,
+      "skipReason": "Model-dependent tests require production model assets"
+    },
+    "modelSmokeInFinalImages": "pending",
+    "realDocumentCorpus": "pending",
+    "independentCryptographicReview": "pending",
+    "independentBiometricCalibration": "pending",
+    "signedCalibrationReport": "pending"
+  },
+  "releaseDecision": "NO-GO"
+}
