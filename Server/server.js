@@ -1427,13 +1427,11 @@ app.post('/auth/accept-invite', rateLimit, async (req, res) => {
   }
 });
 
-// ── PROFILE VERIFICATION (NFC passport, on-device) ──────────────────────────────
-// Викликають НАШІ застосунки (iOS/Android) після успішної звірки чипа НА ПРИСТРОЇ.
-// Паспортні дані СЮДИ НЕ передаються — тільки результат + атестація пристрою.
-//
-// Захист від самоверифікації: аппрув приймається лише від справжнього екземпляра
-// нашого застосунку (iOS: Apple App Attest — реалізовано в appattest.js,
-// Android: Google Play Integrity — TODO).
+// ── PROFILE VERIFICATION (server-authoritative) ────────────────────────────────
+// The client submits an attested verification session and encrypted evidence.
+// Client-reported NFC, passive-auth, AA/CA, face-match and PAD results are never
+// sufficient to activate Verified ID. iOS is bound with Apple App Attest;
+// unsupported platforms must fail closed until equivalent attestation exists.
 const appattest = require('./appattest');
 const passiveauth = require('./passiveauth');
 const verificationPolicy = require('./verification_policy');
