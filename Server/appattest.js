@@ -60,11 +60,12 @@ function configured() {
 
 // ── CHALLENGES (одноразові nonce, прив'язані до користувача) ─────────────────
 const challenges = new Map(); // id -> { contributorId, purpose, bytes, expiresAt }
-const CHALLENGE_TTL_MS = 5 * 60 * 1000;
-// Document authentication spans MRZ/NFC, server-owned CA and liveness. Keep a
-// separate bounded window so a real passport scan does not expire before the
-// final App-Attest-bound /approve request. The nonce remains single-use.
-const DOCUMENT_CHALLENGE_TTL_MS = 10 * 60 * 1000;
+const ATTESTATION_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+// Liveness and document proof nonces are issued immediately before the
+// corresponding physical operation. Keeping their authority window separate
+// from App Attest registration materially reduces real-time relay exposure.
+const LIVENESS_CHALLENGE_TTL_MS = 90 * 1000;
+const DOCUMENT_CHALLENGE_TTL_MS = 90 * 1000;
 const MAX_CHALLENGES = 5000;         // жорсткий ліміт памʼяті (аудит P1-02)
 const MAX_PER_CONTRIBUTOR = 8;       // анти-флуд на один акаунт
 
@@ -104,14 +105,22 @@ function issueChallenge(contributorId, purpose = 'attestation') {
   const bytes = crypto.randomBytes(32);
   const ttlMs = purpose.startsWith('document_auth')
     ? DOCUMENT_CHALLENGE_TTL_MS
-    : CHALLENGE_TTL_MS;
+    : purpose.startsWith('liveness')
+      ? LIVENESS_CHALLENGE_TTL_MS
+      : ATTESTATION_CHALLENGE_TTL_MS;
+  const expiresAt = Date.now() + ttlMs;
   challenges.set(id, {
     contributorId,
     purpose,
     bytes,
-    expiresAt: Date.now() + ttlMs,
+    expiresAt,
   });
-  return { id, challenge: bytes.toString('base64') };
+  return {
+    id,
+    challenge: bytes.toString('base64'),
+    expiresAt: new Date(expiresAt).toISOString(),
+    expiresInSeconds: Math.floor(ttlMs / 1000),
+  };
 }
 
 function consumeChallenge(id, contributorId, purpose = 'attestation') {

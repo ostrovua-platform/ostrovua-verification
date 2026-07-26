@@ -18,8 +18,11 @@ const CURVES = Object.freeze({
 });
 const TOKEN_AAD = Buffer.from('ostrovua-document-ca-v1', 'ascii');
 const TOKEN_VERSION = 1;
-const TOKEN_TTL_MS = 2 * 60 * 1000;
-const RECEIPT_TTL_MS = 5 * 60 * 1000;
+// The encrypted relay token is useful only while the NFC tag is physically
+// connected. The receipt is a post-proof server record and remains available
+// just long enough to finish liveness and submit /approve.
+const TOKEN_TTL_MS = 45 * 1000;
+const RECEIPT_TTL_MS = 3 * 60 * 1000;
 const MAX_DG14_BYTES = 128 * 1024;
 const MAX_PROTECTED_RESPONSE_BYTES = 1024;
 

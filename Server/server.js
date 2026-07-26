@@ -1593,10 +1593,11 @@ app.post('/auth/verify/challenge', rateLimit, async (req, res) => {
       });
     }
   }
-  // document_auth видається перед NFC і не повинен вдруге інкрементувати
-  // одну людську спробу. Але критичний endpoint усе одно залежить від
-  // доступного persistent limiter: rlCheck читає той самий рядок під
-  // транзакційним lock і fail-closed повертає поточний стан.
+  // document_auth видається під час уже активного NFC-сеансу безпосередньо
+  // перед AA/CA і не повинен вдруге інкрементувати одну людську спробу.
+  // Критичний endpoint усе одно залежить від доступного persistent limiter:
+  // rlCheck читає той самий рядок під транзакційним lock і fail-closed
+  // повертає поточний стан.
   if (purpose === 'document_auth' && !calibrationChallenge) {
     try {
       for (const key of rlKeysFor(contributorId, req)) {
@@ -1617,12 +1618,16 @@ app.post('/auth/verify/challenge', rateLimit, async (req, res) => {
     const storedPurpose = calibrationChallenge
       ? `${purpose}_calibration`
       : purpose;
-    const { id, challenge } = appattest.issueChallenge(contributorId, storedPurpose);
+    const {
+      id, challenge, expiresAt, expiresInSeconds,
+    } = appattest.issueChallenge(contributorId, storedPurpose);
     if (purpose === 'liveness') {
       const key = biometricClient.loadEnvelopePublicKey();
       return res.json({
         challengeId: id,
         challenge,
+        expiresAt,
+        expiresInSeconds,
         biometricKeyId: key.keyId,
         biometricPublicKey: key.publicKey,
       });
@@ -1630,6 +1635,8 @@ app.post('/auth/verify/challenge', rateLimit, async (req, res) => {
     return res.json({
       challengeId: id,
       challenge,
+      expiresAt,
+      expiresInSeconds,
       // Capability only; never an assurance result. The client uses it to
       // avoid invoking the relay during dark deployment. /approve still
       // requires the independently verified one-time database receipt.

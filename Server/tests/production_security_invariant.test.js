@@ -80,6 +80,29 @@ test('automatic activation requires server-verified AA or one-time server CA', (
   assert.match(route, /documentAuthenticationChallengeId/);
 });
 
+test('client face verdict cannot bypass authoritative server face match', () => {
+  const route = source('server.js');
+  const serverDecisionGate = route.indexOf(
+    "serverBiometrics.decision !== 'passed'"
+  );
+  const assuranceDecision = route.indexOf('const documentAssurance');
+  const activation = route.indexOf('activateSelfHostedV7');
+
+  assert.ok(serverDecisionGate > 0);
+  assert.ok(
+    serverDecisionGate < assuranceDecision,
+    'server biometric decision must gate document assurance'
+  );
+  assert.ok(
+    serverDecisionGate < activation,
+    'server biometric decision must gate automatic activation'
+  );
+  assert.match(
+    route,
+    /serverBiometrics\s*=\s*await biometricClient\.verifySelfHostedBiometrics/
+  );
+});
+
 test('the production biometric image contains fail-closed replay and document-auth modules', () => {
   const app = source('biometric_service/app.py');
   const cache = source('biometric_service/replay_cache.py');

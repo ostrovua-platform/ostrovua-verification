@@ -131,6 +131,11 @@ test('server-owned CA verifies an independently protected chip RAPDU', () => {
     rawDG14: dg14.toString('base64'),
     ...binding,
   });
+  assert.equal(
+    started.expiresAt,
+    '2026-07-25T12:00:45.000Z',
+    'live NFC relay token must expire after 45 seconds'
+  );
   assert.equal(started.option.protocolOID, ID_CA_ECDH_AES_128);
   assert.equal(started.option.keyAgreementAlgorithm, 'ECDH');
   assert.equal(started.option.cipherAlgorithm, 'AES');
@@ -160,7 +165,7 @@ test('server-owned CA verifies an independently protected chip RAPDU', () => {
   assert.equal(completed.sessionId, started.sessionId);
   assert.equal(
     completed.expiresAt,
-    '2026-07-25T12:05:00.000Z',
+    '2026-07-25T12:03:00.000Z',
     'receipt TTL is independent from the shorter relay-token TTL'
   );
   assert.equal(completed.dg14Hash, crypto.createHash('sha256').update(dg14).digest('hex'));
