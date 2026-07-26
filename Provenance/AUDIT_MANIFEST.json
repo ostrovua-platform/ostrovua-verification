@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-07-26T07:26:26Z",
+  "generatedAt": "2026-07-26T08:19:34Z",
   "repository": "ostrovua-platform/ostrovua-verification",
   "branch": "codex/release-freeze-v7-20260726",
   "auditTarget": {
@@ -41,6 +41,10 @@
     {
       "path": "Server/.env.example",
       "sha256": "9eb2936a6efcfc086117f8782c50d54f976ee0236c02740198e7c9d794dfdf41"
+    },
+    {
+      "path": "Provenance/FINAL_IMAGE_MODEL_SMOKE_20260726.md",
+      "sha256": "a8ef892a94cc732df6960bcb3a8ce22a4cd09a78405ae7a99b26ebe3a14c4e86"
     }
   ],
   "models": [
@@ -151,7 +155,38 @@
       "skipped": 2,
       "skipReason": "Model-dependent tests require production model assets"
     },
-    "modelSmokeInFinalImages": "pending",
+    "modelSmokeInFinalImages": {
+      "status": "passed",
+      "date": "2026-07-26",
+      "sourceCommit": "05b1600b2e7bf6aafbaf8b43983f1105ec4443ab",
+      "targetPlatform": "linux/amd64",
+      "authImage": {
+        "localTag": "ostrovua-auth:audit-05b1600b-amd64",
+        "contentDigest": "sha256:0c8f987530158281d5ebcc25bb4983304c828fc1b151d90238f9c37e3ec13168",
+        "runtimeUser": "root",
+        "nodeVersion": "v20.20.2",
+        "javascriptFilesParsed": 11
+      },
+      "biometricImage": {
+        "localTag": "ostrovua-biometric:audit-05b1600b-amd64-r2",
+        "contentDigest": "sha256:458fce0a4d611ad3c95f554091cc02889765ff5e44b962b85c5aef85c6dc9b5f",
+        "runtimeUser": "12001:12001",
+        "modelSetHash": "291e044feb6c53e2ac9903094bcffd8a20519ef0ee1391c51c0c956ea771c0d0",
+        "calibrationApproved": false,
+        "tests": {
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0
+        },
+        "scores": {
+          "liveFixture": 0.999879,
+          "printSpoofFixture": 0.228581,
+          "screenSpoofFixture": 0.002344
+        }
+      },
+      "evidence": "Provenance/FINAL_IMAGE_MODEL_SMOKE_20260726.md",
+      "registryDigestStatus": "pending publication to the controlled production registry"
+    },
     "realDocumentCorpus": "pending",
     "independentCryptographicReview": "pending",
     "independentBiometricCalibration": "pending",
