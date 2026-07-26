@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-07-26T08:19:34Z",
+  "generatedAt": "2026-07-26T08:49:30Z",
   "repository": "ostrovua-platform/ostrovua-verification",
   "branch": "codex/release-freeze-v7-20260726",
   "auditTarget": {
-    "sourceCommit": "05b1600b2e7bf6aafbaf8b43983f1105ec4443ab",
-    "sourceCommitPurpose": "Harden secret hygiene and clarify the server-authoritative verification boundary",
+    "sourceCommit": "d804b0a27a30fc034a33cc47599d105c69a852ed",
+    "sourceCommitPurpose": "Enforce a fixed non-root auth runtime and freeze private registry release candidates",
     "iosSourceCommit": "6504f4f5c5fdaefb1618618d8dc4392ddf79fd72",
     "documentationCommit": null
   },
@@ -24,7 +24,7 @@
     },
     {
       "path": "Server/Dockerfile",
-      "sha256": "ec256a41c1c9957e1a82e8ba1dc0d6212cbbfbf35fcc996ad2a460d82196ab1a"
+      "sha256": "f165f9481bce601e9fe3024d50c1fdf2b618b8c2b27553d732b360c905e43c6a"
     },
     {
       "path": "Server/biometric_service/Dockerfile",
@@ -45,6 +45,18 @@
     {
       "path": "Provenance/FINAL_IMAGE_MODEL_SMOKE_20260726.md",
       "sha256": "a8ef892a94cc732df6960bcb3a8ce22a4cd09a78405ae7a99b26ebe3a14c4e86"
+    },
+    {
+      "path": "Provenance/RELEASE_EVIDENCE_V7_D804B0A2.json",
+      "sha256": "ac419ab79c2295fe4fee80ec0aa4681880543b3c0483a1b0afd4b556e4984238"
+    },
+    {
+      "path": "Provenance/REGISTRY_RELEASE_CANDIDATES_V7.json",
+      "sha256": "bef08cec754ce6a74e81ee2c7c46f2595e9c8a767243d16e8a5d5f33016cacc2"
+    },
+    {
+      "path": "Provenance/REGISTRY_RELEASE_CANDIDATES_20260726.md",
+      "sha256": "95d516410f4a85cf7af6c9dc3c4e701bebfe46dd6959a38a4ac0433574f4a32a"
     }
   ],
   "models": [
@@ -146,7 +158,7 @@
   },
   "verification": {
     "nodeTests": {
-      "passed": 65,
+      "passed": 66,
       "failed": 0
     },
     "pythonBiometricTests": {
@@ -158,18 +170,20 @@
     "modelSmokeInFinalImages": {
       "status": "passed",
       "date": "2026-07-26",
-      "sourceCommit": "05b1600b2e7bf6aafbaf8b43983f1105ec4443ab",
+      "sourceCommit": "d804b0a27a30fc034a33cc47599d105c69a852ed",
       "targetPlatform": "linux/amd64",
       "authImage": {
-        "localTag": "ostrovua-auth:audit-05b1600b-amd64",
-        "contentDigest": "sha256:0c8f987530158281d5ebcc25bb4983304c828fc1b151d90238f9c37e3ec13168",
-        "runtimeUser": "root",
+        "localTag": "ostrovua-auth:rc-d804b0a2-amd64",
+        "registryReference": "docker.io/whoami33/ostrovua-release-candidates@sha256:4eaa5256cbb76c3cb3bb7358d61cfca091395e53b84330f6fea8504c9c257b63",
+        "contentDigest": "sha256:4eaa5256cbb76c3cb3bb7358d61cfca091395e53b84330f6fea8504c9c257b63",
+        "runtimeUser": "12000:12000",
         "nodeVersion": "v20.20.2",
-        "javascriptFilesParsed": 11
+        "javascriptFilesParsed": 12
       },
       "biometricImage": {
-        "localTag": "ostrovua-biometric:audit-05b1600b-amd64-r2",
-        "contentDigest": "sha256:458fce0a4d611ad3c95f554091cc02889765ff5e44b962b85c5aef85c6dc9b5f",
+        "localTag": "ostrovua-biometric:rc-d804b0a2-amd64",
+        "registryReference": "docker.io/whoami33/ostrovua-release-candidates@sha256:3f90e6e169c285c1ab6cd02d1ed4abb83bac9c5bfad7dcdbf3aab536f390c041",
+        "contentDigest": "sha256:3f90e6e169c285c1ab6cd02d1ed4abb83bac9c5bfad7dcdbf3aab536f390c041",
         "runtimeUser": "12001:12001",
         "modelSetHash": "291e044feb6c53e2ac9903094bcffd8a20519ef0ee1391c51c0c956ea771c0d0",
         "calibrationApproved": false,
@@ -184,8 +198,8 @@
           "screenSpoofFixture": 0.002344
         }
       },
-      "evidence": "Provenance/FINAL_IMAGE_MODEL_SMOKE_20260726.md",
-      "registryDigestStatus": "pending publication to the controlled production registry"
+      "evidence": "Provenance/REGISTRY_RELEASE_CANDIDATES_20260726.md",
+      "registryDigestStatus": "published privately and pull-verified by immutable digest"
     },
     "realDocumentCorpus": "pending",
     "independentCryptographicReview": "pending",

@@ -1,0 +1,101 @@
+{
+  "artifacts": {
+    "active-authentication": {
+      "bytes": 8861,
+      "path": "Server/biometric_service/document_auth.py",
+      "sha256": "2de2871ad52305bad9d62700935b389dbd5a8e4372df30c53c6af474bb0c3c49"
+    },
+    "auth-dockerfile": {
+      "bytes": 895,
+      "path": "Server/Dockerfile",
+      "sha256": "f165f9481bce601e9fe3024d50c1fdf2b618b8c2b27553d732b360c905e43c6a"
+    },
+    "auth-package-lock": {
+      "bytes": 42708,
+      "path": "Server/package-lock.json",
+      "sha256": "8bb10a5ec01c3e78bf681568523ba374672bc8e948f2f48be5511002d8a1d227"
+    },
+    "biometric-dockerfile": {
+      "bytes": 1570,
+      "path": "Server/biometric_service/Dockerfile",
+      "sha256": "2197d60116eacd5dc79edad289e0a5e1a9b3c857c859ec8df7220102bc27e7ae"
+    },
+    "biometric-evaluator": {
+      "bytes": 13733,
+      "path": "Server/biometric_service/evaluate.py",
+      "sha256": "9da12781d216d19a2179ff7fbe689f0ef9cc5e880627a13ebd6a16ecf51654fe"
+    },
+    "biometric-model-manifest": {
+      "bytes": 453,
+      "path": "Server/biometric_service/model_manifest.json",
+      "sha256": "6c6f2b36b138e510ae8e95e233e03308e9a7ff3184f6b9c1e6942ecd791a057e"
+    },
+    "biometric-policy": {
+      "bytes": 10239,
+      "path": "Server/biometric_service/policy.py",
+      "sha256": "f24d50269b4d062ef1632b386946b5e77fb401ab45c742584fb6dede3e974ebc"
+    },
+    "biometric-requirements": {
+      "bytes": 152,
+      "path": "Server/biometric_service/requirements.txt",
+      "sha256": "2864a0f57b63921677cdbfe10b90616769f45abbbbb43ecb5479a4ea8925832d"
+    },
+    "calibration-verifier": {
+      "bytes": 3211,
+      "path": "Server/biometric_service/calibration.py",
+      "sha256": "a549fb11c603074ba0b58a81e4f414b87ffb618f6950c1ba922b51245bfe2b49"
+    },
+    "chip-authentication": {
+      "bytes": 24815,
+      "path": "Server/document_ca.js",
+      "sha256": "bf7cc967cf2e7ca6243f26bbd54e1a720b3c5aeda48228a492931c101348447a"
+    },
+    "nginx-config": {
+      "bytes": 15449,
+      "path": "Server/nginx/nginx.conf",
+      "sha256": "030b9b67afa44eb8825274d91a13d03598b758d85ad8f89eb39f6ecbf1cb591c"
+    }
+  },
+  "generatedAt": "2026-07-26T08:49:30+00:00",
+  "git": {
+    "branch": "codex/release-freeze-v7-20260726",
+    "clean": true,
+    "commit": "d804b0a27a30fc034a33cc47599d105c69a852ed",
+    "dirtyEntryCount": 0
+  },
+  "images": {
+    "auth": "sha256:4eaa5256cbb76c3cb3bb7358d61cfca091395e53b84330f6fea8504c9c257b63",
+    "biometric": "sha256:3f90e6e169c285c1ab6cd02d1ed4abb83bac9c5bfad7dcdbf3aab536f390c041"
+  },
+  "modelSetHash": "291e044feb6c53e2ac9903094bcffd8a20519ef0ee1391c51c0c956ea771c0d0",
+  "policyParameters": {
+    "depth": {
+      "baselineRequired": 4,
+      "coverageMinimum": 0.55,
+      "reliefMaximumMeters": 0.08,
+      "reliefMedianMinimumMeters": 0.008,
+      "reliefSideMinimumMeters": 0.002
+    },
+    "evidence": {
+      "challengeFramesMaximum": 24,
+      "challengeFramesMinimum": 12,
+      "neutralFramesMaximum": 5,
+      "neutralFramesMinimum": 3,
+      "qualityPassFractionMinimum": 0.75
+    },
+    "face": {
+      "challengeMedianMinimum": 0.45,
+      "challengeSingleMinimum": 0.32,
+      "neutralMedianMinimum": 0.5,
+      "neutralSingleMinimum": 0.4
+    },
+    "pad": {
+      "medianMinimum": 0.8,
+      "passFractionMinimum": 0.75,
+      "passScoreMinimum": 0.7,
+      "singleMinimum": 0.5
+    }
+  },
+  "policyVersion": "ostrovua-self-hosted-2026-07-v2",
+  "schema": "ostrovua-release-evidence-v1"
+}
