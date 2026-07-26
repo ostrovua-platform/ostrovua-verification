@@ -12,7 +12,7 @@ import DeviceCheck
 //  ("Device attestation required") — саме так і має бути:
 //  статус Verified ID неможливо отримати в обхід застосунку.
 //
-//  Протокол (backend/auth/server.js + appattest.js, protocolVersion 3):
+//  Протокол (backend/auth/server.js + appattest.js, protocolVersion 5):
 //    1) POST /auth/verify/challenge            → {challengeId, challenge}
 //    2) POST /auth/verify/attest-key           → реєстрація ключа пристрою
 //       body {challengeId, keyId, attestation}
@@ -161,6 +161,11 @@ enum AppAttestService {
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Ключ пристрою — щоб серверний ліміт спроб рахував і по пристрою,
+        // а не лише по акаунту (акаунт створюється за хвилину).
+        if let keyId = storedKeyId {
+            request.setValue(keyId, forHTTPHeaderField: "x-attest-key")
+        }
 
         let (data, response) = try await URLSession.shared.data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0

@@ -81,9 +81,11 @@ struct VerificationEvidence {
 }
 
 enum VerifyService {
+    // Legacy review-only reference client. Production protocol v6 додає
+    // self-hosted raw DG/biometric evidence; див. серверний контракт і README.
     /// POST /auth/verify/approve. Тіло — канонічний payload, ПІДПИСАНИЙ
     /// App Attest assertion (див. AppAttestService: hash = challenge ‖ payload).
-    /// Дані документа НЕ передаються — лише результати перевірок (enum).
+    /// У цьому legacy payload дані документа не передаються.
     /// Сервер зобовʼязаний: перевірити assertion над тим самим digest,
     /// assertion counter (replay), TTL/одноразовість challenge, і
     /// whitelist значень. Verified ID вищого рівня — лише коли

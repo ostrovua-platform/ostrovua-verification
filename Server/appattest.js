@@ -44,13 +44,27 @@ if (!ROOT_CA) {
 
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest();
 
+function strictBase64(value, maxBytes) {
+  if (typeof value !== 'string' || value.length === 0 || value.length % 4 !== 0 ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length > Math.ceil(maxBytes / 3) * 4 + 4) {
+    throw new Error('Некоректний base64');
+  }
+  const decoded = Buffer.from(value, 'base64');
+  if (decoded.length === 0 || decoded.length > maxBytes) throw new Error('Завеликий payload');
+  return decoded;
+}
+
 function configured() {
   return Boolean(ROOT_CA && TEAM_ID && BUNDLE_ID);
 }
 
-// ── CHALLENGES (одноразові nonce, TTL 5 хв, прив'язані до користувача) ───────
-const challenges = new Map(); // id -> { contributorId, bytes, expiresAt }
+// ── CHALLENGES (одноразові nonce, прив'язані до користувача) ─────────────────
+const challenges = new Map(); // id -> { contributorId, purpose, bytes, expiresAt }
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+// Document authentication spans MRZ/NFC, server-owned CA and liveness. Keep a
+// separate bounded window so a real passport scan does not expire before the
+// final App-Attest-bound /approve request. The nonce remains single-use.
+const DOCUMENT_CHALLENGE_TTL_MS = 10 * 60 * 1000;
 const MAX_CHALLENGES = 5000;         // жорсткий ліміт памʼяті (аудит P1-02)
 const MAX_PER_CONTRIBUTOR = 8;       // анти-флуд на один акаунт
 
@@ -60,7 +74,16 @@ setInterval(() => {
   for (const [id, c] of challenges) if (now > c.expiresAt) challenges.delete(id);
 }, 60 * 1000).unref();
 
-function issueChallenge(contributorId) {
+function issueChallenge(contributorId, purpose = 'attestation') {
+  if (![
+    'attestation',
+    'liveness',
+    'liveness_calibration',
+    'document_auth',
+    'document_auth_calibration',
+  ].includes(purpose)) {
+    throw new Error('invalid challenge purpose');
+  }
   // Ліміт на акаунт: витісняємо НАЙСТАРІШІ свої (аудит P1-06 —
   // попередня версія помилково видаляла найновіші).
   const mine = [];
@@ -79,19 +102,41 @@ function issueChallenge(contributorId) {
 
   const id    = crypto.randomBytes(16).toString('base64url');
   const bytes = crypto.randomBytes(32);
-  challenges.set(id, { contributorId, bytes, expiresAt: Date.now() + CHALLENGE_TTL_MS });
+  const ttlMs = purpose.startsWith('document_auth')
+    ? DOCUMENT_CHALLENGE_TTL_MS
+    : CHALLENGE_TTL_MS;
+  challenges.set(id, {
+    contributorId,
+    purpose,
+    bytes,
+    expiresAt: Date.now() + ttlMs,
+  });
   return { id, challenge: bytes.toString('base64') };
 }
 
-function consumeChallenge(id, contributorId) {
+function consumeChallenge(id, contributorId, purpose = 'attestation') {
   const c = challenges.get(id);
   if (!c) return null;
   // ВЛАСНИК перевіряється ДО видалення (аудит P1-06): чужий запит
   // не «спалює» челендж легітимного власника.
-  if (c.contributorId !== contributorId) return null;
+  if (c.contributorId !== contributorId || c.purpose !== purpose) return null;
   challenges.delete(id);                        // одноразовий для власника
   if (Date.now() > c.expiresAt) return null;
   return c.bytes;
+}
+
+// Read-only binding check for multi-step protocols such as server-owned Chip
+// Authentication. The document challenge remains reserved for the final
+// /approve transaction; callers receive a copy so they cannot mutate the
+// in-memory challenge. It is still consumed exactly once by /approve.
+function inspectChallenge(id, contributorId, purpose = 'attestation') {
+  const c = challenges.get(id);
+  if (!c || c.contributorId !== contributorId || c.purpose !== purpose) return null;
+  if (Date.now() > c.expiresAt) {
+    challenges.delete(id);
+    return null;
+  }
+  return Buffer.from(c.bytes);
 }
 
 setInterval(() => {
@@ -127,13 +172,17 @@ function ecPointFromSpki(spkiDer) {
 }
 
 function parseAuthData(authData) {
+  if (!Buffer.isBuffer(authData) || authData.length < 37) throw new Error('authenticatorData закороткий');
+  const hasCredential = authData.length >= 55;
+  const credentialLength = hasCredential ? authData.readUInt16BE(53) : 0;
+  if (hasCredential && 55 + credentialLength > authData.length) throw new Error('credentialId обрізаний');
   return {
     rpIdHash:  authData.subarray(0, 32),
     flags:     authData[32],
     counter:   authData.readUInt32BE(33),
     aaguid:    authData.length >= 53 ? authData.subarray(37, 53) : null,
-    credIdLen: authData.length >= 55 ? authData.readUInt16BE(53) : 0,
-    credId:    authData.length >= 55 ? authData.subarray(55, 55 + authData.readUInt16BE(53)) : null,
+    credIdLen: credentialLength,
+    credId:    hasCredential ? authData.subarray(55, 55 + credentialLength) : null,
   };
 }
 
@@ -145,7 +194,7 @@ const AAGUID_DEV  = Buffer.from('appattestdevelop', 'ascii');
 function verifyAttestation({ attestationB64, keyIdB64, challengeBytes }) {
   if (!configured()) throw new Error('App Attest не сконфігуровано (TEAM_ID/BUNDLE_ID/Root CA)');
 
-  const att = cbor.decodeFirstSync(Buffer.from(attestationB64, 'base64'));
+  const att = cbor.decodeFirstSync(strictBase64(attestationB64, 256 * 1024));
   if (att.fmt !== 'apple-appattest') throw new Error(`Невірний fmt: ${att.fmt}`);
 
   const x5c = att.attStmt && att.attStmt.x5c;
@@ -155,11 +204,15 @@ function verifyAttestation({ attestationB64, keyIdB64, challengeBytes }) {
   const caCert   = new crypto.X509Certificate(x5c[1]);
 
   // Ланцюг довіри: credCert ← caCert ← Apple Root.
+  if (credCert.ca || !caCert.ca) throw new Error('Некоректні CA constraints');
   if (!credCert.verify(caCert.publicKey)) throw new Error('credCert не підписано caCert');
   if (!caCert.verify(ROOT_CA.publicKey))  throw new Error('caCert не підписано Apple Root CA');
   const now = new Date();
   if (now < new Date(credCert.validFrom) || now > new Date(credCert.validTo)) {
     throw new Error('credCert прострочений');
+  }
+  if (now < new Date(caCert.validFrom) || now > new Date(caCert.validTo)) {
+    throw new Error('caCert прострочений');
   }
 
   const authData = att.authData;
@@ -173,7 +226,8 @@ function verifyAttestation({ attestationB64, keyIdB64, challengeBytes }) {
 
   // keyId == SHA256(нестиснута EC-точка публічного ключа credCert)
   const spki   = credCert.publicKey.export({ type: 'spki', format: 'der' });
-  const keyId  = Buffer.from(keyIdB64, 'base64');
+  const keyId  = strictBase64(keyIdB64, 32);
+  if (keyId.length !== 32) throw new Error('keyId має бути 32 байти');
   const calcId = sha256(ecPointFromSpki(spki));
   if (!crypto.timingSafeEqual(keyId, calcId)) throw new Error('keyId не відповідає ключу');
 
@@ -207,7 +261,7 @@ function verifyAttestation({ attestationB64, keyIdB64, challengeBytes }) {
 // Assertion привʼязаний до SHA256(challenge ‖ body): підмінити результати
 // перевірок після підпису неможливо (аудит P0-05).
 function verifyAssertion({ assertionB64, publicKeyPem, challengeBytes, bodyBytes, storedCounter }) {
-  const asrt = cbor.decodeFirstSync(Buffer.from(assertionB64, 'base64'));
+  const asrt = cbor.decodeFirstSync(strictBase64(assertionB64, 64 * 1024));
   const { signature, authenticatorData } = asrt;
   if (!signature || !authenticatorData) throw new Error('Некоректна assertion');
 
@@ -230,4 +284,11 @@ function verifyAssertion({ assertionB64, publicKeyPem, challengeBytes, bodyBytes
   return ad.counter;
 }
 
-module.exports = { configured, issueChallenge, consumeChallenge, verifyAttestation, verifyAssertion };
+module.exports = {
+  configured,
+  issueChallenge,
+  inspectChallenge,
+  consumeChallenge,
+  verifyAttestation,
+  verifyAssertion,
+};

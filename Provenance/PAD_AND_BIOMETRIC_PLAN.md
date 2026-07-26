@@ -3,9 +3,12 @@
 Це release-blocking пункти, які **не закриваються кодом** — потрібні
 фізичні вимірювання. Ми НЕ імітуємо їх виконання. Нижче — конкретні
 протоколи, за якими вони будуть закриті перед high-assurance релізом.
-Поточний код виконав усе, що можливо в коді (depth-gate, ROI —
-у роботі), але мітка `strong` спирається на CSCA-ланцюг + App Attest,
-а не на виміряний PAD, і це чесно зафіксовано в threat-model.
+Поточний production-кандидат — protocol v7. Він технічно дозволяє `strong`
+лише для PA + server-verified AA. DG14/CA-status, прив’язаний до App Attest,
+лишається review-only, доки сервер не перевіряє secure-messaging transcript.
+Операційно auto-activation лишається заблокованим до незалежного
+серверного PAD/face holdout, підписаного calibration report і поетапного
+rollout. Документ без server-verified AA не активується автоматично.
 
 ## #8 — Presentation Attack Detection (ISO/IEC 30107-3)
 
@@ -221,6 +224,12 @@ bonafide + по 5–10 кожної атаки (і незалежний holdout)
 
 Лишається (чесно): більший статистичний збір APCER/BPCER на
 інтегрованому флоу; deepfake/reenactment поза обсягом.
+
+**Методика збору — `PAD_MEASUREMENT_PROTOCOL.md`:** класи (bonafide/photo/
+screen), цілі на клас із біноміальним інтервалом (Wilson 95%: 35 атак → межа
+≤10%, 73 → ≤5%), правила чесності, експорт → `Tools/PADScore/challenge_score.py`
+(тепер друкує довірчі інтервали й скільки спроб бракує до цілі). Стенд
+`ChallengeMeasureView` показує прогрес ПО КЛАСУ (галочка при досягненні цілі).
 
 ## #9 — Face model provenance + FAR/FRR
 
