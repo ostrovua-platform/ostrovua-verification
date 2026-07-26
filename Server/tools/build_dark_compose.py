@@ -123,6 +123,8 @@ def main() -> None:
         ),
         secret_mount("password_reset_pepper", "password_reset_pepper.key"),
     ]
+    # Do not allow a legacy source compose file to override the image USER.
+    auth["user"] = "12000:12000"
 
     biometric_env = environment(biometric)
     biometric_env.update(

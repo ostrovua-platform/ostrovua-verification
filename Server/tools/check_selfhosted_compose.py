@@ -154,6 +154,8 @@ def main() -> None:
     require_secret_mount(auth, "password_reset_pepper.key")
     require_secret_mount(biometric, "biometric_hmac.key")
     require_secret_mount(biometric, "biometric_envelope_private.key")
+    if str(auth.get("user", "")).lower() != "12000:12000":
+        fail("auth service must run as the fixed image user 12000:12000")
     for mount in auth.get("volumes", []):
         if not isinstance(mount, dict):
             continue

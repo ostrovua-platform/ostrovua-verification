@@ -118,6 +118,8 @@ test('the production biometric image contains fail-closed replay and document-au
 
 test('the production auth image runs as a fixed non-root user', () => {
   const dockerfile = source('Dockerfile');
+  const composeBuilder = source('tools/build_dark_compose.py');
+  const composeGate = source('tools/check_selfhosted_compose.py');
   const userDeclaration = dockerfile.lastIndexOf('USER 12000:12000');
   const commandDeclaration = dockerfile.lastIndexOf('CMD ["node", "server.js"]');
 
@@ -134,6 +136,11 @@ test('the production auth image runs as a fixed non-root user', () => {
   assert.doesNotMatch(
     dockerfile.slice(userDeclaration),
     /USER\s+(?:0(?::0)?|root(?::root)?)\b/
+  );
+  assert.match(composeBuilder, /auth\["user"\]\s*=\s*"12000:12000"/);
+  assert.match(
+    composeGate,
+    /auth\.get\("user", ""\)[\s\S]*!=\s*"12000:12000"/
   );
 });
 
