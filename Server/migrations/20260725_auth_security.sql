@@ -140,6 +140,15 @@ BEGIN
        OR (p_user_agent_hash IS NOT NULL AND p_user_agent_hash !~ '^[0-9a-f]{64}$') THEN
         RAISE EXCEPTION 'invalid auth session input';
     END IF;
+    IF NOT EXISTS (
+        SELECT 1
+          FROM public.contributors c
+         WHERE c.id = p_contributor_id
+           AND c.status = 'active'
+           AND c.banned IS NOT TRUE
+    ) THEN
+        RAISE EXCEPTION 'contributor is not active';
+    END IF;
 
     INSERT INTO public.auth_sessions(
         id, contributor_id, expires_at, ip_hash, user_agent_hash
@@ -170,6 +179,7 @@ BEGIN
        AND s.contributor_id = p_contributor_id
        AND s.revoked_at IS NULL
        AND s.expires_at > clock_timestamp()
+       AND c.status = 'active'
        AND c.banned IS NOT TRUE;
 
     IF COALESCE(v_active, false) THEN

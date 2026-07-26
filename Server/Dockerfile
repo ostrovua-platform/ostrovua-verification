@@ -14,7 +14,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY server.js appattest.js apns.js passiveauth.js \
      verification_policy.js self_hosted_contract.js biometric_client.js \
      production_verification_store.js auth_security_store.js \
-     security_policy.js document_ca.js validate_dsc_chain.js ./
+     security_policy.js media_sanitizer.js oauth_identity.js \
+     document_ca.js validate_dsc_chain.js ./
 
 RUN mkdir -p /app/uploads \
     && chown 12000:12000 /app/uploads \

@@ -178,29 +178,12 @@ function classifyUpload(buffer) {
   return null;
 }
 
-function normalizeAvatarDataUrl(value, { maximumBytes = 2 * 1024 * 1024 } = {}) {
-  if (typeof value !== 'string') return null;
-  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]*={0,2})$/.exec(value);
-  if (!match) return null;
-
-  const decoded = decodeBase64Strict(match[2]);
-  if (!decoded || decoded.length === 0 || decoded.length > maximumBytes) return null;
-
-  const detected = classifyUpload(decoded);
-  if (!detected || detected.disposition !== 'inline') return null;
-  if (!['image/jpeg', 'image/png', 'image/webp'].includes(detected.mime)) return null;
-  if (detected.mime !== match[1]) return null;
-
-  return `data:${detected.mime};base64,${decoded.toString('base64')}`;
-}
-
 module.exports = {
   PASSWORD_HASH_PREFIX,
   classifyUpload,
   decodeBase64Strict,
   escapeHtml,
   hashPassword,
-  normalizeAvatarDataUrl,
   normalizedOrigin,
   passwordPrehash,
   serializeForInlineScript,

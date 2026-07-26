@@ -4,16 +4,21 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const sharp = require('sharp');
 
 const {
   classifyUpload,
   decodeBase64Strict,
-  normalizeAvatarDataUrl,
   normalizedOrigin,
   passwordPrehash,
   serializeForInlineScript,
   validateNewPassword,
 } = require('../security_policy');
+const {
+  MediaSanitizationError,
+  sanitizeAvatarDataUrl,
+  sanitizeRasterImage,
+} = require('../media_sanitizer');
 
 function source(relativePath) {
   return fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8');
@@ -114,21 +119,69 @@ test('upload type is derived from content and active web formats are rejected', 
   assert.equal(classifyUpload(svg), null);
 });
 
-test('avatar data URL requires canonical raster bytes and matching MIME', () => {
-  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0, 1, 2, 3]);
+test('image sanitizer decodes pixels and removes embedded metadata', async () => {
+  const jpeg = await sharp({
+    create: {
+      width: 24,
+      height: 16,
+      channels: 3,
+      background: { r: 20, g: 100, b: 180 },
+    },
+  })
+    .withMetadata({ orientation: 6, density: 300 })
+    .jpeg()
+    .toBuffer();
+  const sourceMetadata = await sharp(jpeg).metadata();
+  assert.ok(sourceMetadata.exif);
+
+  const sanitized = await sanitizeRasterImage(jpeg);
+  const outputMetadata = await sharp(sanitized.buffer).metadata();
+  assert.equal(sanitized.mime, 'image/webp');
+  assert.equal(sanitized.extension, 'webp');
+  assert.equal(outputMetadata.format, 'webp');
+  assert.equal(outputMetadata.exif, undefined);
+  assert.equal(outputMetadata.xmp, undefined);
+  assert.equal(outputMetadata.iptc, undefined);
+  assert.equal(outputMetadata.icc, undefined);
+  assert.notDeepEqual(sanitized.buffer, jpeg);
+
+  sanitized.buffer.fill(0);
+  jpeg.fill(0);
+});
+
+test('non-image media is rejected instead of being stored as original bytes', async () => {
+  await assert.rejects(
+    sanitizeRasterImage(Buffer.from('%PDF-1.7\n')),
+    (error) => error instanceof MediaSanitizationError &&
+      error.code === 'media_unsupported'
+  );
+});
+
+test('avatar data URL is re-encoded and requires matching raster MIME', async () => {
+  const jpeg = await sharp({
+    create: {
+      width: 8,
+      height: 8,
+      channels: 3,
+      background: { r: 100, g: 40, b: 20 },
+    },
+  }).withMetadata({ orientation: 3 }).jpeg().toBuffer();
   const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>');
   const jpegUrl = `data:image/jpeg;base64,${jpeg.toString('base64')}`;
 
-  assert.equal(normalizeAvatarDataUrl(jpegUrl), jpegUrl);
+  const sanitized = await sanitizeAvatarDataUrl(jpegUrl);
+  assert.match(sanitized, /^data:image\/webp;base64,/);
+  assert.notEqual(sanitized, jpegUrl);
   assert.equal(
-    normalizeAvatarDataUrl(`data:image/png;base64,${jpeg.toString('base64')}`),
+    await sanitizeAvatarDataUrl(`data:image/png;base64,${jpeg.toString('base64')}`),
     null
   );
   assert.equal(
-    normalizeAvatarDataUrl(`data:image/svg+xml;base64,${svg.toString('base64')}`),
+    await sanitizeAvatarDataUrl(`data:image/svg+xml;base64,${svg.toString('base64')}`),
     null
   );
-  assert.equal(normalizeAvatarDataUrl('https://attacker.example/tracker.png'), null);
+  assert.equal(await sanitizeAvatarDataUrl('https://attacker.example/tracker.png'), null);
+  jpeg.fill(0);
 });
 
 test('upload route ignores user filenames and nginx blocks legacy active extensions', () => {
@@ -138,8 +191,10 @@ test('upload route ignores user filenames and nginx blocks legacy active extensi
   const uploadEnd = server.indexOf("// ── Дзвінки", uploadStart);
   const route = server.slice(uploadStart, uploadEnd);
 
-  assert.match(route, /classifyUpload\(buf\)/);
-  assert.match(route, /uploadType\.extension/);
+  assert.match(route, /sanitizeRasterImage\(buf/);
+  assert.match(route, /sanitized\.extension/);
+  assert.match(route, /writeFile\(storedPath,\s*sanitized\.buffer/);
+  assert.doesNotMatch(route, /writeFileSync\([^;]*,\s*buf/);
   assert.doesNotMatch(route, /split\(['"]\.['"]\)|path\.extname\(name/);
   assert.match(nginx, /legacy \.html\/\.svg\/\.js upload/);
   assert.match(nginx, /X-Content-Type-Options\s+"nosniff"/);
@@ -155,7 +210,7 @@ test('avatar rendering and update are restricted to safe image types', () => {
   const route = server.slice(routeStart, routeEnd);
 
   assert.match(route, /requireContributor\(req, res\)/);
-  assert.match(route, /normalizeAvatarDataUrl\(photo_url\)/);
+  assert.match(route, /sanitizeAvatarDataUrl\(photo_url\)/);
   assert.doesNotMatch(route, /startsWith\(['"]data:image\/['"]\)/);
   assert.match(frontend, /const safeImageUrl =/);
   assert.match(frontend, /data:image\\\/\(\?:jpeg\|png\|webp\)/);

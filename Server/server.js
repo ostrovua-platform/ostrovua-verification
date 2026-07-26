@@ -27,18 +27,26 @@ const crypto         = require('crypto');
 const fs             = require('fs');
 const path           = require('path');
 const {
-  classifyUpload,
   decodeBase64Strict,
   escapeHtml,
   hashPassword,
-  normalizeAvatarDataUrl,
   normalizedOrigin,
   serializeForInlineScript,
   validateNewPassword,
   verifyPassword,
 } = require('./security_policy');
+const {
+  MediaSanitizationError,
+  sanitizeAvatarDataUrl,
+  sanitizeRasterImage,
+} = require('./media_sanitizer');
 const { createAuthSecurityStore } = require('./auth_security_store');
 const { createDocumentCA } = require('./document_ca');
+const {
+  githubVerifiedEmail,
+  googleVerifiedEmail,
+  oauthEmailForNewIdentity,
+} = require('./oauth_identity');
 
 const app = express();
 const IS_PROD = (process.env.APP_ENV || process.env.NODE_ENV) === 'production';
@@ -324,77 +332,228 @@ function rlLockedMessage(until) {
 }
 
 // ── FIND OR CREATE CONTRIBUTOR (for OAuth) ────────────────────────────────────
-async function findOrCreateContributor({ email, name, photo_url, provider, provider_id }) {
-  // 1. Try find by OAuth provider ID — most reliable, works even without email
-  if (provider && provider_id) {
-    const found = await hasuraAdmin(
-      `query($pid: String!, $prov: String!) {
-         contributors(where:{oauth_provider_id:{_eq:$pid}, oauth_provider:{_eq:$prov}}, limit:1)
-         { id name role photo_url consent_level password_hash }
-       }`,
-      { pid: String(provider_id), prov: provider }
-    );
-    if (found.contributors?.[0]) return withTheme(found.contributors[0]);
+async function findOrCreateContributor({
+  email,
+  email_verified = false,
+  allow_provider_without_email = false,
+  name,
+  photo_url,
+  provider,
+  provider_id,
+}) {
+  const normalizedProvider = typeof provider === 'string'
+    ? provider.trim().toLowerCase()
+    : '';
+  const providerSubject = provider_id == null ? '' : String(provider_id).trim();
+  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(normalizedProvider) ||
+      !providerSubject || providerSubject.length > 255) {
+    throw new Error('oauth_identity_invalid');
+  }
+  const normalizedEmail = oauthEmailForNewIdentity(email, {
+    verified: email_verified,
+    allowProviderWithoutEmail: allow_provider_without_email,
+  });
+
+  const identityMatch = await hasuraAdmin(
+    `query($pid: String!, $prov: String!) {
+       contributors(where:{oauth_provider_id:{_eq:$pid}, oauth_provider:{_eq:$prov}}, limit:1)
+       {
+         id name email role status banned photo_url consent_level password_hash
+         oauth_provider oauth_provider_id oauth_email_verified_at
+       }
+     }`,
+    { pid: providerSubject, prov: normalizedProvider }
+  );
+  if (identityMatch.contributors?.[0]) {
+    const existingIdentity = identityMatch.contributors[0];
+    if (existingIdentity.status !== 'active' || existingIdentity.banned === true) {
+      throw new Error('oauth_account_inactive');
+    }
+    if (!allow_provider_without_email &&
+        !existingIdentity.oauth_email_verified_at) {
+      // Legacy OAuth rows were linked before verified-email ownership was
+      // recorded. Re-affirm them once with the provider's verified email so an
+      // old unsafe link cannot remain a permanent account-takeover path.
+      if (existingIdentity.email !== normalizedEmail) {
+        throw new Error('oauth_identity_email_mismatch');
+      }
+      const affirmed = await hasuraAdmin(
+        `mutation(
+          $id: uuid!,
+          $pid: String!,
+          $prov: String!,
+          $email: String!,
+          $active: String!,
+          $verifiedAt: timestamptz!
+        ) {
+          update_contributors(
+            where:{
+              id:{_eq:$id},
+              oauth_provider_id:{_eq:$pid},
+              oauth_provider:{_eq:$prov},
+              email:{_eq:$email},
+              status:{_eq:$active},
+              _or:[
+                {banned:{_eq:false}},
+                {banned:{_is_null:true}}
+              ]
+            },
+            _set:{oauth_email_verified_at:$verifiedAt}
+          ) {
+            affected_rows
+            returning {
+              id name email role status banned photo_url consent_level password_hash
+              oauth_provider oauth_provider_id oauth_email_verified_at
+            }
+          }
+        }`,
+        {
+          id: existingIdentity.id,
+          pid: providerSubject,
+          prov: normalizedProvider,
+          email: normalizedEmail,
+          active: 'active',
+          verifiedAt: new Date().toISOString(),
+        }
+      );
+      if (affirmed.update_contributors?.affected_rows !== 1 ||
+          !affirmed.update_contributors.returning?.[0]) {
+        throw new Error('oauth_identity_reaffirm_failed');
+      }
+      return withTheme(affirmed.update_contributors.returning[0]);
+    }
+    return withTheme(existingIdentity);
   }
 
-  // 2. Try find by email (e.g. user registered via email/password earlier)
-  if (email) {
+  if (normalizedEmail) {
     const found = await hasuraAdmin(
       `query($email: String!) {
          contributors(where:{email:{_eq:$email}}, limit:1)
-         { id name role photo_url consent_level password_hash }
+         {
+           id name email role status banned photo_url consent_level password_hash
+           oauth_provider oauth_provider_id oauth_email_verified_at
+         }
        }`,
-      { email }
+      { email: normalizedEmail }
     );
     if (found.contributors?.[0]) {
       const existing = found.contributors[0];
-      // Link OAuth provider to this account so next login uses provider_id lookup
-      if (provider && provider_id && !existing.oauth_provider_id) {
-        await hasuraAdmin(
-          `mutation($id: uuid!, $pid: String!, $prov: String!) {
-             update_contributors_by_pk(pk_columns:{id:$id}, _set:{oauth_provider_id:$pid, oauth_provider:$prov})
-             { id }
-           }`,
-          { id: existing.id, pid: String(provider_id), prov: provider }
-        ).catch(() => {}); // non-fatal
+      if (existing.status !== 'active' || existing.banned === true) {
+        throw new Error('oauth_account_inactive');
       }
-      return withTheme(existing);
+      if (existing.oauth_provider_id) {
+        if (existing.oauth_provider !== normalizedProvider ||
+            existing.oauth_provider_id !== providerSubject) {
+          throw new Error('oauth_identity_conflict');
+        }
+        return withTheme(existing);
+      }
+
+      const linked = await hasuraAdmin(
+        `mutation(
+          $id: uuid!,
+          $pid: String!,
+          $prov: String!,
+          $active: String!,
+          $verifiedAt: timestamptz!
+        ) {
+          update_contributors(
+            where:{
+              id:{_eq:$id},
+              oauth_provider_id:{_is_null:true},
+              status:{_eq:$active},
+              _or:[
+                {banned:{_eq:false}},
+                {banned:{_is_null:true}}
+              ]
+            },
+            _set:{
+              oauth_provider_id:$pid,
+              oauth_provider:$prov,
+              oauth_email_verified_at:$verifiedAt
+            }
+          ) {
+            affected_rows
+            returning {
+              id name email role status banned photo_url consent_level password_hash
+              oauth_provider oauth_provider_id oauth_email_verified_at
+            }
+          }
+        }`,
+        {
+          id: existing.id,
+          pid: providerSubject,
+          prov: normalizedProvider,
+          active: 'active',
+          verifiedAt: new Date().toISOString(),
+        }
+      );
+      if (linked.update_contributors?.affected_rows !== 1 ||
+          !linked.update_contributors.returning?.[0]) {
+        throw new Error('oauth_identity_link_failed');
+      }
+      return withTheme(linked.update_contributors.returning[0]);
     }
   }
 
-  // 3. Create new contributor
   const inserted = await hasuraAdmin(
     `mutation($obj: contributors_insert_input!) {
-       insert_contributors_one(object:$obj) { id name role photo_url consent_level password_hash }
+       insert_contributors_one(object:$obj) {
+         id name email role status banned photo_url consent_level password_hash
+         oauth_provider oauth_provider_id oauth_email_verified_at
+       }
      }`,
     { obj: {
         name:              name || 'OAuth User',
-        email:             email || null,
+        email:             normalizedEmail,
         role:              'Учасник',
         status:            'active',
         description:       '',
         consent_level:     'none',
         photo_url:         photo_url || null,
-        oauth_provider:    provider    || null,
-        oauth_provider_id: provider_id ? String(provider_id) : null,
+        oauth_provider:    normalizedProvider,
+        oauth_provider_id: providerSubject,
+        oauth_email_verified_at: normalizedEmail ? new Date().toISOString() : null,
     }}
   );
   return withTheme(inserted.insert_contributors_one);
 }
 
 // ── JWT HELPER ────────────────────────────────────────────────────────────────
+async function loadAuthenticatableContributor(contributorId) {
+  if (typeof contributorId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        .test(contributorId)) {
+    return null;
+  }
+  const authorization = await hasuraAdmin(
+    `query($id: uuid!) {
+       contributors_by_pk(id:$id) { id name role status banned }
+     }`,
+    { id: contributorId }
+  );
+  const authenticatable = authorization.contributors_by_pk;
+  if (!authenticatable || authenticatable.status !== 'active' ||
+      authenticatable.banned === true) {
+    return null;
+  }
+  return authenticatable;
+}
+
 async function issueToken(contributor, req) {
+  const authenticatable = await loadAuthenticatableContributor(contributor?.id);
+  if (!authenticatable) throw new Error('auth_account_inactive');
   const sessionId = crypto.randomUUID();
   const token = jwt.sign(
     {
       'https://hasura.io/jwt/claims': {
         'x-hasura-default-role':   'user',
         'x-hasura-allowed-roles':  ['user'],
-        'x-hasura-contributor-id': contributor.id,
+        'x-hasura-contributor-id': authenticatable.id,
       },
-      sub: contributor.id,
-      name: contributor.name,
-      role: contributor.role,
+      sub: authenticatable.id,
+      name: authenticatable.name,
+      role: authenticatable.role,
       sid: sessionId,
       jti: crypto.randomUUID(),
       auth_time: Math.floor(Date.now() / 1000),
@@ -406,7 +565,7 @@ async function issueToken(contributor, req) {
   if (!claims?.exp) throw new Error('auth_session_token_expiry_missing');
   await authSecurityStore.createSession({
     sessionId,
-    contributorId: contributor.id,
+    contributorId: authenticatable.id,
     expiresAt: new Date(claims.exp * 1000),
     ip: req?.ip || '',
     userAgent: req?.get?.('user-agent') || '',
@@ -726,10 +885,17 @@ if (GOOGLE_CLIENT_ID) {
     callbackURL:  `${AUTH_BASE_URL}/auth/google/callback`,
   }, async (accessToken, refreshToken, profile, done) => {
     try {
-      const email    = profile.emails?.[0]?.value;
+      const email    = googleVerifiedEmail(profile);
       const name     = profile.displayName;
       const photo    = profile.photos?.[0]?.value;
-      const contrib  = await findOrCreateContributor({ email, name, photo_url: photo, provider: 'google', provider_id: profile.id });
+      const contrib  = await findOrCreateContributor({
+        email,
+        email_verified: Boolean(email),
+        name,
+        photo_url: photo,
+        provider: 'google',
+        provider_id: profile.id,
+      });
       done(null, contrib);
     } catch (e) { done(e); }
   }));
@@ -759,12 +925,22 @@ if (GITHUB_CLIENT_ID) {
     clientID:     GITHUB_CLIENT_ID,
     clientSecret: GITHUB_CLIENT_SECRET,
     callbackURL:  `${AUTH_BASE_URL}/auth/github/callback`,
+    // passport-github2 removes the provider's `verified` flag unless raw email
+    // objects are requested. Account linking must never use that stripped form.
+    allRawEmails: true,
   }, async (accessToken, refreshToken, profile, done) => {
     try {
-      const email   = profile.emails?.find(e => e.primary)?.value || profile.emails?.[0]?.value;
+      const email   = githubVerifiedEmail(profile);
       const name    = profile.displayName || profile.username;
       const photo   = profile.photos?.[0]?.value;
-      const contrib = await findOrCreateContributor({ email, name, photo_url: photo, provider: 'github', provider_id: profile.id });
+      const contrib = await findOrCreateContributor({
+        email,
+        email_verified: Boolean(email),
+        name,
+        photo_url: photo,
+        provider: 'github',
+        provider_id: profile.id,
+      });
       done(null, contrib);
     } catch (e) { done(e); }
   }));
@@ -883,7 +1059,15 @@ app.post('/auth/telegram', rateLimit, async (req, res) => {
     const name     = [data.first_name, data.last_name].filter(Boolean).join(' ');
     const email    = null; // Telegram doesn't provide email
     const photo    = data.photo_url || null;
-    const contrib  = await findOrCreateContributor({ email, name, photo_url: photo, provider: 'telegram', provider_id: data.id });
+    const contrib  = await findOrCreateContributor({
+      email,
+      email_verified: false,
+      allow_provider_without_email: true,
+      name,
+      photo_url: photo,
+      provider: 'telegram',
+      provider_id: data.id,
+    });
     const token    = await issueToken(contrib, req);
     return res.json({ token, contributor: safe(contrib) });
   } catch (e) {
@@ -907,16 +1091,21 @@ app.post('/auth/login', rateLimit, async (req, res) => {
   try {
     const data = await hasuraAdmin(
       `query Login($email: String!) {
-         contributors(where:{email:{_eq:$email}}, limit:1) { id name role photo_url consent_level password_hash banned }
+         contributors(where:{email:{_eq:$email}}, limit:1) {
+           id name role status photo_url consent_level password_hash banned
+         }
        }`, { email }
     );
     const c = data.contributors?.[0];
     const hashToCompare = c?.password_hash || '$2b$12$invalidhashfortimingattackprevention00000000000000000';
     const ok = await verifyPassword(password, hashToCompare, bcrypt);
     if (!c || !ok) return res.status(401).json({ error: 'Невірний email або пароль' });
-    // Бан: пароль правильний, але вхід заборонено (перевіряємо ПІСЛЯ
-    // пароля, щоб не розкривати стан акаунта стороннім).
-    if (c.banned) return res.status(403).json({ error: 'Акаунт заблоковано за порушення правил спільноти.' });
+    // Check after password verification to avoid disclosing account state.
+    if (c.banned || c.status !== 'active') {
+      return res.status(403).json({
+        error: 'Акаунт деактивовано. Звернись у підтримку.',
+      });
+    }
     return res.json({
       token: await issueToken(c, req),
       contributor: safe(await withTheme(c)),
@@ -1215,10 +1404,7 @@ app.post('/auth/update-avatar', rateLimit, async (req, res) => {
   const { photo_url } = req.body || {};
   if (!photo_url) return res.status(400).json({ error: 'photo_url обов\'язковий' });
 
-  // Profile uploads are always re-encoded by the first-party frontend. Accept
-  // only canonical raster data URLs whose declared MIME matches magic bytes.
-  // This excludes SVG/HTML polyglots, external tracking URLs and mixed content.
-  const canonicalPhoto = normalizeAvatarDataUrl(photo_url);
+  const canonicalPhoto = await sanitizeAvatarDataUrl(photo_url);
   if (!canonicalPhoto) {
     return res.status(400).json({ error: 'Фото має бути JPEG, PNG або WebP до 2 МБ' });
   }
@@ -1382,22 +1568,54 @@ app.post('/auth/accept-invite', rateLimit, async (req, res) => {
 
     // Якщо контакт уже існує (напр. створений координатором/OAuth без пароля) — оновлюємо.
     const exist = await hasuraAdmin(
-      `query($email: String!) { contributors(where:{email:{_eq:$email}}, limit:1) { id password_hash } }`,
+      `query($email: String!) {
+         contributors(where:{email:{_eq:$email}}, limit:1) {
+           id password_hash status banned
+         }
+       }`,
       { email }
     );
     let c;
     if (exist.contributors?.[0]) {
-      if (exist.contributors[0].password_hash) {
+      const existing = exist.contributors[0];
+      if (existing.status !== 'active' || existing.banned === true) {
+        return res.status(403).json({
+          error: 'Акаунт деактивовано. Звернись у підтримку.',
+        });
+      }
+      if (existing.password_hash) {
         return res.status(409).json({ error: 'Користувач вже зареєстрований. Скористайся входом.' });
       }
       const upd = await hasuraAdmin(
-        `mutation($id: uuid!, $obj: contributors_set_input!) {
-           update_contributors_by_pk(pk_columns:{id:$id}, _set:$obj)
-           { id name role photo_url consent_level }
+        `mutation($id: uuid!, $active: String!, $obj: contributors_set_input!) {
+           update_contributors(
+             where:{
+               id:{_eq:$id},
+               password_hash:{_is_null:true},
+               status:{_eq:$active},
+               _or:[
+                 {banned:{_eq:false}},
+                 {banned:{_is_null:true}}
+               ]
+             },
+             _set:$obj
+           ) {
+             affected_rows
+             returning { id name role photo_url consent_level }
+           }
          }`,
-        { id: exist.contributors[0].id, obj: { password_hash, name, role, status: 'active' } }
+        {
+          id: existing.id,
+          active: 'active',
+          obj: { password_hash, name, role },
+        }
       );
-      c = upd.update_contributors_by_pk;
+      if (upd.update_contributors?.affected_rows !== 1) {
+        return res.status(409).json({
+          error: 'Стан акаунта змінився. Спробуй увійти або звернись у підтримку.',
+        });
+      }
+      c = upd.update_contributors.returning?.[0];
     } else {
       const ins = await hasuraAdmin(
         `mutation($obj: contributors_insert_input!) {
@@ -1449,10 +1667,10 @@ const {
 } = require('./production_verification_store');
 const verificationStore = createProductionVerificationStore(hasuraSQL);
 
-async function authenticateBearer(req, { allowMissing = false } = {}) {
+async function authenticateBearer(req) {
   const auth = req.headers.authorization;
   if (!auth?.startsWith('Bearer ')) {
-    return allowMissing ? { status: 'anonymous' } : { status: 'invalid' };
+    return { status: 'invalid' };
   }
   let payload;
   try {
@@ -1470,6 +1688,10 @@ async function authenticateBearer(req, { allowMissing = false } = {}) {
     });
     if (!active) return { status: 'invalid' };
   } else if (AUTH_SESSION_ENFORCEMENT_ENABLED) {
+    return { status: 'invalid' };
+  } else if (!await loadAuthenticatableContributor(id)) {
+    // Legacy JWTs can remain usable while session enforcement is dark, but an
+    // account-state change must invalidate them immediately.
     return { status: 'invalid' };
   }
   return { status: 'authenticated', contributorId: id, payload };
@@ -1493,12 +1715,11 @@ async function requireContributor(req, res) {
   }
 }
 
-// Nginx auth_request uses this endpoint in front of Hasura. Anonymous GraphQL
-// remains possible under Hasura's anonymous role, but every presented bearer
-// token must be valid and not revoked.
+// Nginx auth_request uses this endpoint in front of Hasura. GraphQL is never
+// reachable without an active, non-revoked server-side session.
 app.get('/auth/introspect', async (req, res) => {
   try {
-    const auth = await authenticateBearer(req, { allowMissing: true });
+    const auth = await authenticateBearer(req);
     return auth.status === 'invalid' ? res.sendStatus(401) : res.sendStatus(204);
   } catch (error) {
     console.error('[auth-introspect]', error.message);
@@ -2573,10 +2794,7 @@ app.post('/auth/device-token', rateLimit, async (req, res) => {
   }
 });
 
-// ── Вкладення чату: файли БЕЗ стиснення (до 25 МБ) ─────────────────
-//  Великі файли не влазять у базу (data-URL), тому лежать на диску:
-//  /app/uploads (docker-volume uploads_data), роздає nginx як /files/…
-//  Імʼя — випадкові 32 hex-символи: вгадати посилання неможливо.
+// ── Вкладення чату: metadata-free raster images (до 25 МБ) ──────────
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/app/uploads';
 const UPLOAD_MAX = 25 * 1024 * 1024;
 
@@ -2584,7 +2802,7 @@ app.post('/auth/upload', rateLimit, async (req, res) => {
   const contributorId = await requireContributor(req, res);
   if (!contributorId) return;
 
-  const { name, data } = req.body || {};
+  const { data } = req.body || {};
   if (!data || typeof data !== 'string') {
     return res.status(400).json({ error: 'Порожній файл' });
   }
@@ -2594,37 +2812,55 @@ app.post('/auth/upload', rateLimit, async (req, res) => {
     return res.status(400).json({ error: 'Файл не розкодувався' });
   }
   if (buf.length > UPLOAD_MAX) {
+    buf.fill(0);
     return res.status(413).json({ error: 'Файл завеликий. Максимум — 25 МБ.' });
   }
 
-  // The client-provided filename is never used to choose the stored extension.
-  // Only a narrow, magic-byte-verified media allowlist is accepted.
-  const uploadType = classifyUpload(buf);
-  if (!uploadType) {
-    return res.status(415).json({
-      error: 'Непідтримуваний формат. Дозволені JPEG, PNG, GIF, WebP, HEIC, AVIF, MP4, MOV, M4A, WebM і PDF.',
-    });
-  }
-  const fname = `${crypto.randomBytes(16).toString('hex')}.${uploadType.extension}`;
-
+  let sanitized;
+  let storedPath;
   try {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true, mode: 0o750 });
-    fs.writeFileSync(path.join(UPLOAD_DIR, fname), buf, { flag: 'wx', mode: 0o600 });
+    sanitized = await sanitizeRasterImage(buf, {
+      maximumInputBytes: UPLOAD_MAX,
+      maximumOutputBytes: UPLOAD_MAX,
+    });
+    const fname = `${crypto.randomBytes(16).toString('hex')}.${sanitized.extension}`;
+    storedPath = path.join(UPLOAD_DIR, fname);
+
+    await fs.promises.mkdir(UPLOAD_DIR, { recursive: true, mode: 0o750 });
+    await fs.promises.writeFile(storedPath, sanitized.buffer, {
+      flag: 'wx',
+      mode: 0o600,
+    });
     await authSecurityStore.registerUpload({ filename: fname, contributorId });
+    const base = process.env.PUBLIC_APP_URL || 'https://ostrovua.online';
+    console.log(
+      `[upload] ${contributorId.slice(0, 8)}… sanitized ` +
+      `(${Math.round(sanitized.buffer.length / 1024)} КБ)`
+    );
+    return res.json({
+      ok: true,
+      url: `${base}/files/${fname}`,
+      mime: sanitized.mime,
+      disposition: sanitized.disposition,
+    });
   } catch (e) {
-    try { fs.unlinkSync(path.join(UPLOAD_DIR, fname)); } catch (_) {}
+    if (storedPath) {
+      try { await fs.promises.unlink(storedPath); } catch (_) {}
+    }
+    if (e instanceof MediaSanitizationError) {
+      const status = e.code === 'media_too_large' || e.code === 'media_too_complex'
+        ? 413
+        : (e.code === 'media_unsupported' ? 415 : 422);
+      return res.status(status).json({
+        error: 'Файл не збережено. Зараз дозволені лише зображення, які можна безпечно перекодувати.',
+      });
+    }
     console.error('[upload]', e.message);
     return res.status(500).json({ error: 'Помилка сервера' });
+  } finally {
+    buf.fill(0);
+    if (sanitized?.buffer) sanitized.buffer.fill(0);
   }
-
-  const base = process.env.PUBLIC_APP_URL || 'https://ostrovua.online';
-  console.log(`[upload] ${contributorId.slice(0, 8)}… accepted (${Math.round(buf.length / 1024)} КБ)`);
-  return res.json({
-    ok: true,
-    url: `${base}/files/${fname}`,
-    mime: uploadType.mime,
-    disposition: uploadType.disposition,
-  });
 });
 
 function canonicalUploadPath(filename) {

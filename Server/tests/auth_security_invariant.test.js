@@ -54,10 +54,59 @@ test('account deletion is transactional and preserves a non-identifying receipt'
 test('revoked bearer sessions gate Hasura and security flags stay fail-closed', () => {
   const server = read('server.js');
   const nginx = read('nginx/nginx.conf');
+  const composeGate = read('tools/check_selfhosted_compose.py');
 
   assert.match(server, /AUTH_SESSION_ENFORCEMENT_ENABLED\s*=\s*process\.env\.AUTH_SESSION_ENFORCEMENT_ENABLED === '1'/);
   assert.match(server, /authSecurityStore\.isSessionActive/);
   assert.match(server, /app\.get\('\/auth\/introspect'/);
+  assert.match(server, /const auth = await authenticateBearer\(req\);/);
+  assert.doesNotMatch(server, /authenticateBearer\(req,\s*\{\s*allowMissing:\s*true/);
   assert.match(nginx, /auth_request\s+\/_auth_session/);
   assert.match(nginx, /proxy_pass\s+http:\/\/auth\/auth\/introspect/);
+  assert.match(
+    composeGate,
+    /only edge service \{edge_name!r\} may publish host ports/
+  );
+});
+
+test('OAuth account selection requires provider-verified email ownership', () => {
+  const server = read('server.js');
+  const migration = read('migrations/20260726_oauth_status_hardening.sql');
+
+  assert.match(server, /googleVerifiedEmail\(profile\)/);
+  assert.match(server, /githubVerifiedEmail\(profile\)/);
+  assert.match(server, /allRawEmails:\s*true/);
+  assert.match(server, /oauthEmailForNewIdentity\(email/);
+  assert.match(server, /oauth_identity_email_mismatch/);
+  assert.match(server, /oauth_identity_reaffirm_failed/);
+  assert.doesNotMatch(server, /profile\.emails\?\.\[0\]\?\.value/);
+  assert.match(migration, /contributors_oauth_identity_uidx/);
+  assert.match(migration, /contributors_normalized_email_uidx/);
+  assert.match(migration, /oauth_email_verified_at/);
+});
+
+test('inactive contributor cannot create or continue an authentication session', () => {
+  const server = read('server.js');
+  const originalMigration = read('migrations/20260725_auth_security.sql');
+  const rolloutMigration = read('migrations/20260726_oauth_status_hardening.sql');
+
+  assert.match(server, /authenticatable\.status !== 'active'/);
+  assert.match(server, /c\.status !== 'active'/);
+  assert.match(server, /else if \(!await loadAuthenticatableContributor\(id\)\)/);
+  assert.doesNotMatch(
+    server,
+    /obj:\s*\{\s*password_hash,\s*name,\s*role,\s*status:\s*'active'\s*\}/
+  );
+  for (const migration of [originalMigration, rolloutMigration]) {
+    const createStart = migration.indexOf(
+      'CREATE OR REPLACE FUNCTION public.auth_session_create'
+    );
+    const activeStart = migration.indexOf(
+      'CREATE OR REPLACE FUNCTION public.auth_session_is_active'
+    );
+    assert.ok(createStart >= 0);
+    assert.ok(activeStart > createStart);
+    assert.match(migration.slice(createStart, activeStart), /c\.status = 'active'/);
+    assert.match(migration.slice(activeStart), /c\.status = 'active'/);
+  }
 });
