@@ -22,10 +22,6 @@
       --green:#34d399; --red:#f87171; --yellow:#fbbf24;
       --r:12px; --sidebar:80px;
     }
-
-    /* ─── СВІТЛА ТЕМА ─────────────────────────────────────────────
-       Акцент (lime) затемнено до оливкового, щоб читався як текст
-       і на світлому фоні, лишаючись впізнаваним брендовим зеленим. */
     html[data-theme="light"] {
       --bg:#f5f7fb; --bg2:#ffffff; --surface:#ffffff; --surface2:#eef1f7;
       --border:#e3e7f0; --border2:#d2d8e6;
@@ -33,7 +29,6 @@
       --text:#161a2b; --muted:#5d6480;
       --green:#0f9d6e; --red:#dc4c4c; --yellow:#b8860b;
     }
-    /* Точкові правки хардкод-кольорів під світлу тему */
     html[data-theme="light"] body { background-image:radial-gradient(ellipse 80% 40% at 50% -10%, rgba(95,122,18,.06) 0%, transparent 100%); }
     html[data-theme="light"] .topbar { background:rgba(255,255,255,.85); }
     html[data-theme="light"] .modal { background:rgba(255,255,255,.94); border-color:rgba(0,0,0,.08); box-shadow:0 32px 80px rgba(20,26,43,.22),inset 0 1px 0 rgba(255,255,255,.6); }
