@@ -1,0 +1,14 @@
+node_modules
+npm-debug.log
+.env
+certs
+csca
+biometric_secrets
+biometric_calibration
+biometric_service
+migrations
+nginx
+tests
+tools
+__pycache__
+*.pyc

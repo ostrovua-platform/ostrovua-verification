@@ -269,8 +269,12 @@ struct VerificationView: View {
                         }
                     } label: {
                         FigmaHint(
-                            title: trs("Погане світло або відблиск?"),
-                            subtitle: showManualMRZEntry ? trs("Сховати ручний ввід") : trs("Можна ввести MRZ вручну.")
+                            title: viewModel.mrzIsValid
+                                ? trs("Дані не збігаються з документом?")
+                                : trs("Погане світло або відблиск?"),
+                            subtitle: showManualMRZEntry
+                                ? trs("Сховати ручний ввід")
+                                : (viewModel.mrzIsValid ? trs("Виправ MRZ вручну.") : trs("Можна ввести MRZ вручну."))
                         )
                     }
                     .buttonStyle(.plain)
@@ -284,7 +288,7 @@ struct VerificationView: View {
                         screen = .nfc
                     } label: {
                         VerifyPrimaryButtonLabel(
-                            title: trs("Продовжити"),
+                            title: viewModel.mrzIsValid ? trs("Дані вірні — продовжити") : trs("Продовжити"),
                             enabled: viewModel.mrzIsValid && viewModel.mrz.isUkrainian
                         )
                     }
@@ -413,6 +417,11 @@ struct VerificationView: View {
     /// Считанные MRZ-данные (после сканера или ручного ввода).
     private var scannedDataCard: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // Явне підтвердження: розпізнавання не ідеальне (напр. «G»↔«6»),
+            // тож просимо звірити з документом перед читанням чипа.
+            Text(trs("Звір дані з документом перед продовженням"))
+                .font(.inter(12, .bold))
+                .foregroundStyle(palette.textPrimary)
             HStack {
                 Text(trs("Номер документа"))
                     .foregroundStyle(palette.textSecondary)
@@ -657,6 +666,22 @@ struct VerificationView: View {
                 VerifyCoralButtonLabel(title: trs("Спробувати ще раз"))
             }
             .buttonStyle(.plain)
+
+            // Часта причина E-402 — MRZ зчитано НЕВІРНО (OCR), тож ключ
+            // до чипа неправильний і повтор не допоможе. Даємо явний шлях
+            // виправити дані ВРУЧНУ (номер/дати як у документі).
+            Button {
+                nfcManager.reset()
+                showManualMRZEntry = true
+                screen = .mrz
+            } label: {
+                Text(trs("Дані зчиталися невірно? Ввести вручну"))
+                    .font(.inter(14, .semibold))
+                    .foregroundStyle(palette.textPrimary)
+                    .underline()
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
         }
         .padding(.horizontal, 20)
         .padding(.top, 54)
@@ -741,11 +766,11 @@ struct VerificationView: View {
                         sodBase64: nfcManager.chipSOD?.base64EncodedString(),
                         dgHashes: nfcManager.dgHashes
                     )
-                    let saved = await CurrentSession.shared.markVerified(evidence: evidence)
+                    let saved = await CurrentSession.shared.submitVerification(evidence: evidence)
                     await MainActor.run {
                         isMatchingFace = false
                         if saved { wipeSensitiveData(); screen = .success }
-                        else { challengeError = session.verifySyncError ?? trs("Сервер не підтвердив статус.") }
+                        else { challengeError = session.verifySyncError ?? trs("Сервер не прийняв заявку.") }
                     }
                 case .uncertain(let s):
                     await MainActor.run {
@@ -980,7 +1005,7 @@ struct VerificationView: View {
                             sodBase64: nfcManager.chipSOD?.base64EncodedString(),
                             dgHashes: nfcManager.dgHashes
                         )
-                        let saved = await CurrentSession.shared.markVerified(evidence: evidence)
+                        let saved = await CurrentSession.shared.submitVerification(evidence: evidence)
                         // Транзакція могла застаріти під час мережевого підтвердження
                         if txn != verifyTxn {
                             await MainActor.run { isMatchingFace = false }
@@ -1041,20 +1066,13 @@ struct VerificationView: View {
                         .foregroundStyle(palette.onLime)
                 )
 
-            Text("Верифікацію\nпройдено")
+            Text(trs("Заявку\nприйнято"))
                 .font(.inter(28, .heavy))
                 .foregroundStyle(palette.textPrimary)
                 .multilineTextAlignment(.center)
 
-            (
-                Text(trs("Твій профіль отримав статус Verified"))
-                    .foregroundStyle(palette.textSecondary)
-                + Text("ID")
-                    .foregroundStyle(palette.coral)
-                    .fontWeight(.bold)
-                + Text(".\nТепер можна користуватися довіреними сервісами OstrovUA.")
-                    .foregroundStyle(palette.textSecondary)
-            )
+            Text(trs("Справжність документа підтверджено криптографічно. Заявка очікує незалежної перевірки; Verified ID ще не активовано."))
+                .foregroundStyle(palette.textSecondary)
             .font(.lufga(14, .light))
             .multilineTextAlignment(.center)
 
@@ -1075,12 +1093,8 @@ struct VerificationView: View {
                             .font(.inter(16, .bold))
                             .foregroundStyle(palette.textPrimary)
 
-                        (
-                            Text("Verified ")
-                                .foregroundStyle(palette.textPrimary)
-                            + Text("ID")
-                                .foregroundStyle(palette.coral)
-                        )
+                        Text(trs("Очікує перевірки"))
+                            .foregroundStyle(palette.coral)
                         .font(.inter(12, .bold))
                     }
 
@@ -1088,7 +1102,7 @@ struct VerificationView: View {
                 }
 
                 HStack(spacing: 10) {
-                    Text(trs("Профіль активний"))
+                    Text(trs("Заявка прийнята"))
                         .font(.inter(12, .semibold))
                         .foregroundStyle(palette.onLime)
                         .padding(.horizontal, 14)
@@ -1107,9 +1121,8 @@ struct VerificationView: View {
 
             Spacer()
 
-            // Статус Verified ID уже записаний у базу на кроці звірки
-            // обличчя (fail-closed: без підтвердження сервера екран успіху
-            // взагалі не показується). Тут — лише перехід до профілю.
+            // Екран означає лише успішну подачу в review. Verified ID
+            // з'явиться після окремого серверного рішення.
             Button {
                 screen = .profileSetup
             } label: {
@@ -1124,7 +1137,7 @@ struct VerificationView: View {
                     .multilineTextAlignment(.center)
             }
 
-            Text(trs("Дані документа не зберігаються — лише статус Verified ID"))
+            Text(trs("Персональні дані документа не зберігаються"))
                 .font(.lufga(11, .light))
                 .foregroundStyle(palette.textSecondary)
         }

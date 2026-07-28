@@ -44,17 +44,15 @@ enum ChallengeState: Equatable {
 
 final class ActiveLivenessChallenge {
 
-    // Пороги — ПОПЕРЕДНІ, калібрувати виміром.
-    // horiz = (нос.x − середина_очей.x) / міжочна_відстань. Фронтально
-    // ≈ 0; поворот голови зсуває ніс → |horiz| росте.
-    private let turnThreshold: Double = 0.18     // поворот зараховано
-    private let neutralHoriz: Double = 0.10      // «дивиться прямо»
-    private let earOpen: Double = 0.24
-    private let earClosed: Double = 0.15
+    // Пороги ВІДНОСНО КАЛІБРОВАНОЇ БАЗИ користувача (аудит: 9/10 фейлів
+    // живого — бо «прямо» ≠ horiz 0 при зйомці з рук). Спершу ловимо
+    // нейтральне положення носа й відкритий EAR цієї людини, далі
+    // повороти/кліпання міряємо як ВІДХИЛЕННЯ від бази.
+    private let turnDelta: Double = 0.14        // відхилення носа для повороту
+    private let neutralMargin: Double = 0.09    // «повернувся в нейтраль»
+    private let blinkRatio: Double = 0.62       // око «закрите», якщо ear < ratio*base
+    private let armRatio: Double = 0.80         // «відкрите» для arm
     private let neutralFramesNeeded = 3
-    // 8 c: перший вимір показав фейл живого через таймаут на 3-й дії
-    // (поріг брався легко, не встиг за 6 c). Атаку це не послаблює —
-    // фото/екран не виконають дію взагалі.
     private let perActionTimeout: TimeInterval = 8.0
 
     private(set) var sequence: [LivenessAction]
@@ -62,12 +60,26 @@ final class ActiveLivenessChallenge {
     private var neutralRun = 0
     private var actionStartedAt: Date?
     private var attemptStartedAt: Date?
-    private var blinkArmed = false        // спершу очі відкриті, потім закриті → кліп
+    private var blinkArmed = false
+
+    // Лічильник НЕВІРНИХ рухів (анти-реплей): заздалегідь записане відео
+    // зі «всіма діями» неминуче показує не ту дію, поки челендж чекає
+    // потрібну. Живий, що дивиться підказку, так майже не помиляється.
+    private var wrongMoves = 0
+    private var lastWrongCounted: LivenessAction?
+    private let maxWrongMoves = 2        // 2-й великий невірний рух → фейл
+
+    // Калібрування бази під конкретного користувача.
+    private var baseHoriz: Double?
+    private var baseEar: Double?
+    private var calHoriz: [Double] = []
+    private var calEar: [Double] = []
+    private let calibrationSamples = 8
 
     /// Детермінована послідовність з серверного nonce (анти-реплей):
     /// однакова на клієнті й сервері, але непередбачувана наперед.
     /// seed = challenge bytes від сервера; length = скільки дій.
-    init(seed: Data, length: Int = 3) {
+    init(seed: Data, length: Int = 2) {
         var actions: [LivenessAction] = []
         let all = LivenessAction.allCases
         // PRNG = послідовні блоки SHA256(seed ‖ counter)
@@ -91,7 +103,13 @@ final class ActiveLivenessChallenge {
         actionStartedAt = nil
         attemptStartedAt = Date()
         blinkArmed = false
+        wrongMoves = 0
+        lastWrongCounted = nil
+        baseHoriz = nil; baseEar = nil
+        calHoriz = []; calEar = []
     }
+
+    private var calibrated: Bool { baseHoriz != nil && baseEar != nil }
 
     /// Загальний дедлайн попитки — щоб не зависати, якщо нейтраль так і
     /// не досягнута (напр., атака ніколи не центрується).
@@ -101,6 +119,7 @@ final class ActiveLivenessChallenge {
 
     /// Поточна підказка користувачу.
     var guidance: String {
+        if calibrated == false { return "Тримай обличчя прямо…" }
         switch state {
         case .awaitingNeutral: return "Дивись прямо в камеру"
         case .awaitingAction(let step): return sequence[step].prompt
@@ -111,13 +130,8 @@ final class ActiveLivenessChallenge {
     }
 
     /// Обробити кадр: horiz = зсув носа відносно лінії очей, ear.
-    /// Повертає true, якщо челендж завершено (passed).
-    /// ЗНАК horiz для ліво/право може відрізнятись через дзеркало
-    /// фронталки — калібрується виміром (якщо ліво/право переплутані,
-    /// міняємо знаки нижче).
     @discardableResult
     func process(horiz: Double?, ear: Double?) -> Bool {
-        // Загальний таймаут (працює навіть коли horiz nil / нема обличчя)
         if case .awaitingNeutral = state {} else if case .awaitingAction = state {} else {
             return state == .passed
         }
@@ -127,9 +141,24 @@ final class ActiveLivenessChallenge {
         }
         guard let horiz else { return false }
 
+        // ── Калібрування бази під користувача (перші кадри) ──────────
+        if calibrated == false {
+            calHoriz.append(horiz)
+            if let e = ear { calEar.append(e) }
+            if calHoriz.count >= calibrationSamples {
+                baseHoriz = median(calHoriz)
+                baseEar = calEar.isEmpty ? 0.30 : median(calEar)
+                // дедлайн рахуємо від завершення калібрування
+                attemptStartedAt = Date()
+            }
+            return false
+        }
+        let base = baseHoriz ?? 0
+        let dev = horiz - base                    // відхилення від «прямо» цієї людини
+
         switch state {
         case .awaitingNeutral(let step):
-            let neutral = abs(horiz) < neutralHoriz && (ear ?? 1) > earOpen
+            let neutral = abs(dev) < neutralMargin && eyesOpen(ear)
             neutralRun = neutral ? neutralRun + 1 : 0
             if neutralRun >= neutralFramesNeeded {
                 state = .awaitingAction(step: step)
@@ -142,15 +171,26 @@ final class ActiveLivenessChallenge {
                 state = .failed("Не встиг виконати дію. Спробуй ще раз.")
                 return false
             }
-            if satisfied(action: sequence[step], horiz: horiz, ear: ear) {
+            let required = sequence[step]
+            if satisfied(action: required, dev: dev, ear: ear) {
                 let next = step + 1
-                if next >= sequence.count {
-                    state = .passed
-                    return true
-                } else {
-                    neutralRun = 0
-                    state = .awaitingNeutral(step: next)
+                if next >= sequence.count { state = .passed; return true }
+                neutralRun = 0
+                state = .awaitingNeutral(step: next)
+            } else if let ev = evidentAction(dev: dev, ear: ear), ev != required {
+                // НЕВІРНИЙ рух: не та дія, поки ми чекаємо потрібну.
+                // Записане наперед відео зі всіма діями неминуче сюди
+                // потрапляє; живий, що читає підказку, — майже ні.
+                if ev != lastWrongCounted {
+                    lastWrongCounted = ev
+                    wrongMoves += 1
+                    if wrongMoves >= maxWrongMoves {
+                        state = .failed("Забагато невірних рухів. Виконуй саме те, що на підказці.")
+                        return false
+                    }
                 }
+            } else if abs(dev) < neutralMargin {
+                lastWrongCounted = nil        // повернувся в нейтраль → рахуємо наступний невірний
             }
 
         case .passed, .failed, .idle:
@@ -159,18 +199,37 @@ final class ActiveLivenessChallenge {
         return state == .passed
     }
 
-    private func satisfied(action: LivenessAction, horiz: Double, ear: Double?) -> Bool {
+    private func eyesOpen(_ ear: Double?) -> Bool {
+        guard let ear, let base = baseEar, base > 0 else { return true }
+        return ear > armRatio * base
+    }
+
+    /// Яка дія «очевидна» в цьому кадрі — для лічильника невірних рухів.
+    /// blink тут спрощено (просто закрите око), цього досить, щоб зловити
+    /// «моргання/поворот не в ту сторону, коли просили інше».
+    private func evidentAction(dev: Double, ear: Double?) -> LivenessAction? {
+        if dev < -turnDelta { return .turnLeft }
+        if dev >  turnDelta { return .turnRight }
+        if let ear, let b = baseEar, b > 0, ear < blinkRatio * b { return .blink }
+        return nil
+    }
+
+    private func satisfied(action: LivenessAction, dev: Double, ear: Double?) -> Bool {
         switch action {
-        // Знаки скориговано за виміром (дзеркало фронталки): поворот
-        // голови ЛІВОРУЧ зсуває ніс у −horiz, ПРАВОРУЧ — у +horiz.
-        case .turnLeft:  return horiz < -turnThreshold
-        case .turnRight: return horiz >  turnThreshold
+        // Знаки за виміром (дзеркало фронталки): ЛІВОРУЧ → −dev, ПРАВОРУЧ → +dev.
+        case .turnLeft:  return dev < -turnDelta
+        case .turnRight: return dev >  turnDelta
         case .blink:
-            guard let ear else { return false }
-            if ear > earOpen { blinkArmed = true }          // спершу відкриті
-            if blinkArmed && ear < earClosed { return true } // потім закрились
+            guard let ear, let base = baseEar, base > 0 else { return false }
+            if ear > armRatio * base { blinkArmed = true }            // відкриті → arm
+            if blinkArmed && ear < blinkRatio * base { return true }  // закрились → кліп
             return false
         }
+    }
+
+    private func median(_ a: [Double]) -> Double {
+        let s = a.sorted(); let n = s.count
+        return n == 0 ? 0 : (n % 2 == 1 ? s[n/2] : (s[n/2 - 1] + s[n/2]) / 2)
     }
 
     // MARK: - Геометрія: горизонтальний зсув носа відносно очей

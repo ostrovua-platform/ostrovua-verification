@@ -22,6 +22,7 @@ final class ChallengeLivenessManager: NSObject, ObservableObject {
     private var challenge: ActiveLivenessChallenge?
     private var completion: ((Bool) -> Void)?
     private let ciContext = CIContext()
+    private var stopped = false          // queue-local guard (не @Published)
 
     /// Фронтальний кадр обличчя, знятий під час нейтральної пози —
     /// одразу йде на звірку з фото з чипа (DG2). Один флоу, без
@@ -32,7 +33,9 @@ final class ChallengeLivenessManager: NSObject, ObservableObject {
     /// віддається назад для evidence.
     func start(seed: Data, completion: @escaping (Bool) -> Void) {
         self.completion = completion
-        let c = ActiveLivenessChallenge(seed: seed, length: 3)
+        self.stopped = false
+        self.capturedFace = nil
+        let c = ActiveLivenessChallenge(seed: seed, length: 2)
         c.start()
         challenge = c
         DispatchQueue.main.async {
@@ -63,21 +66,34 @@ final class ChallengeLivenessManager: NSObject, ObservableObject {
         }
     }
 
+    // fail/succeed викликаються з camera-queue: guard — по queue-локальному
+    // stopped, а @Published (finished/passed/guidance) публікуємо з main
+    // (інакше «Publishing changes from background threads»).
     private func fail(_ msg: String) {
-        guard finished == false else { return }
-        finished = true; passed = false; guidance = msg
-        stop(); completion?(false); completion = nil
+        guard stopped == false else { return }
+        stopped = true
+        stop()
+        let cb = completion; completion = nil
+        DispatchQueue.main.async {
+            self.guidance = msg; self.passed = false; self.finished = true
+            cb?(false)
+        }
     }
     private func succeed() {
-        guard finished == false else { return }
-        finished = true; passed = true; guidance = "Готово"
-        stop(); completion?(true); completion = nil
+        guard stopped == false else { return }
+        stopped = true
+        stop()
+        let cb = completion; completion = nil
+        DispatchQueue.main.async {
+            self.guidance = "Готово"; self.passed = true; self.finished = true
+            cb?(true)
+        }
     }
 }
 
 extension ChallengeLivenessManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ o: AVCaptureOutput, didOutput sb: CMSampleBuffer, from c: AVCaptureConnection) {
-        guard let challenge, finished == false, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
+        guard let challenge, stopped == false, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
         let req = VNDetectFaceLandmarksRequest { [weak self] req, _ in
             guard let self else { return }
             let face = (req.results as? [VNFaceObservation])?.first
@@ -88,9 +104,10 @@ extension ChallengeLivenessManager: AVCaptureVideoDataOutputSampleBufferDelegate
             let earR = ActiveLivenessChallenge.eyeAspectRatio(lm?.rightEye)
             let ear = [earL, earR].compactMap { $0 }.reduce(0, +) / Double(max(1, [earL, earR].compactMap { $0 }.count))
 
-            // Знімаємо ФРОНТАЛЬНИЙ кадр (для звірки з DG2), коли обличчя
-            // прямо й очі відкриті — найкраще для розпізнавання.
-            if let h = horiz, abs(h) < 0.10, (earL ?? earR ?? 0) > 0.24,
+            // Знімаємо кадр обличчя для звірки з DG2, коли обличчя в кадрі
+            // й очі відкриті (нейтральні фази — і так фронтальні). Умову
+            // не завʼязуємо на абсолютний horiz (база в людини зсунута).
+            if horiz != nil, (earL ?? earR ?? 0) > 0.20,
                let img = self.makeImage(from: pb) {
                 self.capturedFace = img
             }

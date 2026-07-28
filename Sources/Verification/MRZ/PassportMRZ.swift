@@ -138,6 +138,38 @@ struct PassportMRZ: Equatable {
         String(raw.filter(\.isNumber).prefix(6))
     }
 
+    /// OCR плутає літери й цифри (G↔6, O↔0, S↔5, B↔8, I↔1, Z↔2, D↔0, A↔4).
+    /// Класика цього бага — «G» зчитано як «6». Чек-цифра ICAO цього НЕ
+    /// ловить: G=16 і 6 різняться рівно на 10, а чек за модулем 10 —
+    /// незмінний, тож кривий номер проходив валідацію мовчки й давав
+    /// неправильний BAC-ключ (чип не читався). Виправляємо за ФОРМАТОМ
+    /// документа України:
+    ///   • закордонний паспорт — 2 ЛІТЕРИ + 6 цифр (філлер «<» на поз. 8):
+    ///     номер НЕ може починатися з цифри;
+    ///   • ID-картка — 9 цифр.
+    /// Коректний скан не змінюється (мапи чіпають лише «чужий» клас у
+    /// цій позиції), тож регресії немає.
+    static func normalizeDocNumber(_ raw9: String) -> String {
+        var cs = Array(raw9)
+        guard cs.count == 9 else { return raw9 }
+
+        let toLetter: [Character: Character] =
+            ["0": "O", "1": "I", "2": "Z", "4": "A", "5": "S", "6": "G", "8": "B"]
+        let toDigit: [Character: Character] =
+            ["O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "Z": "2",
+             "A": "4", "S": "5", "G": "6", "B": "8"]
+
+        if cs[8] == "<" {
+            // Закордонний паспорт: поз. 0–1 — літери, 2–7 — цифри.
+            for i in 0..<2 { if let c = toLetter[cs[i]] { cs[i] = c } }
+            for i in 2..<8 { if let c = toDigit[cs[i]]  { cs[i] = c } }
+        } else {
+            // ID-картка: усі 9 — цифри.
+            for i in 0..<9 { if let c = toDigit[cs[i]] { cs[i] = c } }
+        }
+        return String(cs)
+    }
+
     // MARK: - Парсинг второй строки MRZ (TD3, 44 символа)
 
     /// Разбирает вторую строку MRZ паспорта:
@@ -163,7 +195,11 @@ struct PassportMRZ: Equatable {
 
         let chars = Array(line)
 
-        let docNumberRaw = String(chars[0..<9])
+        // OCR-корекція номера за ФОРМАТОМ України (див. normalizeDocNumber):
+        // класичний баг «G зчитано як 6» чек-цифра НЕ ловить (G=16 і 6
+        // різняться на 10, чек за mod 10 — незмінний), тож виправляємо
+        // за формою (паспорт = 2 літери + 6 цифр; номер не з цифри).
+        let docNumberRaw = Self.normalizeDocNumber(String(chars[0..<9]))
         let docCheck = chars[9]
         let nationality = String(chars[10..<13])
         let birth = String(chars[13..<19])

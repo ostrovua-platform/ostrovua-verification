@@ -17,9 +17,10 @@
 //  Проти клонів існує Chip/Active Authentication — окремий етап.
 //
 //  ПРИВАТНІСТЬ: SOD не містить імені, номера, дати народження чи фото —
-//  лише хеші груп даних, сертифікат і підпис. Персональні поля документа
-//  на сервер як і раніше НЕ передаються. SOD перевіряється у тимчасовій
-//  теці й одразу видаляється; у базі лишається тільки результат.
+//  лише хеші груп даних, сертифікат і підпис. У protocol v6 сирі DG1/DG2
+//  тимчасово надходять для серверного hashing; вони не пишуться у temp-файли
+//  або БД, а mutable buffers затираються власником маршруту після рішення.
+//  SOD перевіряється у тимчасовій теці й одразу видаляється.
 //
 //  РЕСУРСИ (аудит P1-05): усі виклики openssl — асинхронні (execFile),
 //  кількість одночасних перевірок обмежена семафором, розмір входу —
@@ -30,9 +31,27 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 
 const MASTERLIST = process.env.CSCA_MASTERLIST || '/app/csca/csca_ua.pem';
+// Каталог пошуку DSC для документів, які не вкладають signer certificate у
+// SOD. Наявність сертифіката тут НЕ надає довіри: після пошуку завжди окремо
+// перевіряються ланцюжок DSC→CSCA та revocation/active snapshot.
+//
+// CSCA_DSC лишено лише як безпечний fallback для старих deployment: у такому
+// режимі lookup та active вказують на той самий, вузький active bundle.
+const ACTIVE_DSC_BUNDLE =
+  process.env.CSCA_ACTIVE_DSC || process.env.CSCA_DSC || '/app/csca/dsc_ua.pem';
+const DSC_LOOKUP_BUNDLE =
+  process.env.CSCA_DSC_LOOKUP || ACTIVE_DSC_BUNDLE;
+const CRL_FILE = process.env.CSCA_CRL || '/app/csca/csca_ua.crl.pem';
+// Якщо держава не публікує CRL для конкретного нового CSCA, приймаємо DSC
+// лише з адміністративно імпортованого official active-all snapshot. Snapshot
+// швидко протухає: це обмежує revocation window і не перетворює bundle на
+// безстроковий trust store.
+const ACTIVE_DSC_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const ACTIVE_DSC_MIN_CERTIFICATES = 90;
 // Вимкнення перевірки строку дії DSC — FAIL-CLOSED (аудит P1-01):
 // дозволено ЛИШЕ при ЯВНОМУ APP_ENV=development. Будь-яка опечатка
 // в APP_ENV трактується як production і НЕ вмикає no_check_time.
@@ -42,6 +61,10 @@ const REQUIRE_UA = process.env.PA_REQUIRE_UA !== '0';
 
 const MAX_SOD_B64_CHARS = 96 * 1024; // ліміт ДО decode (реальний SOD ~2-7 КБ b64)
 const MAX_SOD_BYTES = 64 * 1024;
+const MAX_DG1_BYTES = 128 * 1024;
+const MAX_DG2_BYTES = 2 * 1024 * 1024;
+const MAX_DG14_BYTES = 128 * 1024;
+const MAX_DG15_BYTES = 128 * 1024;
 const OPENSSL_TIMEOUT_MS = 5000;
 const MAX_CONCURRENT = 2;            // семафор: не блокуємо auth-сервіс
 
@@ -69,8 +92,142 @@ function openssl(args) {
       timeout: OPENSSL_TIMEOUT_MS,
       maxBuffer: 1024 * 1024,
       encoding: 'buffer',
-    }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+    }, (err, stdout, stderr) => {
+      if (err) { err.stderr = stderr ? stderr.toString() : ''; reject(err); }
+      else resolve(stdout);
+    });
   });
+}
+
+function classifyCMSFailure(stderr) {
+  const detail = String(stderr || '').toLowerCase();
+  if (detail.includes('signer certificate not found')) {
+    // Валідність підпису ще неможливо визначити: у SOD немає DSC, а
+    // адміністративний ICAO PKD bundle не покриває цього підписанта.
+    return { status: 'unavailable', reason: 'dsc_not_found' };
+  }
+  if (detail.includes('unsupported') || detail.includes('unknown digest') ||
+      detail.includes('unknown cipher') || detail.includes('fetch failed')) {
+    return { status: 'unavailable', reason: 'cms_algorithm_unsupported' };
+  }
+  if (detail.includes('error reading smime content info') ||
+      detail.includes('asn1 encoding routines') ||
+      detail.includes('content type not signed data') ||
+      detail.includes('no content')) {
+    return { status: 'failed', reason: 'sod_cms_malformed' };
+  }
+  return { status: 'failed', reason: 'cms_signature_invalid' };
+}
+
+function classifyChainFailure(stderr) {
+  const detail = String(stderr || '').toLowerCase();
+  if (detail.includes('certificate revoked')) {
+    return { status: 'failed', reason: 'dsc_revoked' };
+  }
+  if (detail.includes('unable to get certificate crl') ||
+      detail.includes('unable to get crl') ||
+      detail.includes('crl has expired') ||
+      detail.includes('crl is not yet valid')) {
+    return { status: 'unavailable', reason: 'crl_unavailable' };
+  }
+  if (detail.includes('explicit ecc parameters')) {
+    // OpenSSL 3 rejects this legacy encoding before signature validation.
+    // Some current UA DSCs use explicit Brainpool parameters, so this is a
+    // compatibility limitation, not evidence of a forged document.
+    return { status: 'unavailable', reason: 'dsc_legacy_ec_unsupported' };
+  }
+  if (detail.includes('unable to get local issuer certificate') ||
+      detail.includes('unable to verify the first certificate')) {
+    return { status: 'unavailable', reason: 'csca_not_found' };
+  }
+  return { status: 'failed', reason: 'csca_chain_failed' };
+}
+
+async function containsPEMCertificate(file) {
+  try {
+    return (await fs.promises.readFile(file, 'utf8')).includes('-----BEGIN CERTIFICATE-----');
+  } catch {
+    return false;
+  }
+}
+
+async function containsPEMCRL(file) {
+  try {
+    return (await fs.promises.readFile(file, 'utf8')).includes('-----BEGIN X509 CRL-----');
+  } catch {
+    return false;
+  }
+}
+
+let activeDscCache = null;
+async function loadFreshActiveDSCBundle(
+  bundlePath = ACTIVE_DSC_BUNDLE,
+  minimumCertificates = ACTIVE_DSC_MIN_CERTIFICATES
+) {
+  const stat = await fs.promises.stat(bundlePath);
+  if (activeDscCache && activeDscCache.mtimeMs === stat.mtimeMs &&
+      activeDscCache.size === stat.size && activeDscCache.path === bundlePath) {
+    if (Date.now() - activeDscCache.generatedAt > ACTIVE_DSC_MAX_AGE_MS) {
+      throw new Error('active_dsc_stale');
+    }
+    return activeDscCache.fingerprints;
+  }
+  if (stat.size <= 0 || stat.size > 4 * 1024 * 1024) {
+    throw new Error('active_dsc_size_invalid');
+  }
+  const bundle = await fs.promises.readFile(bundlePath, 'utf8');
+  const generatedMatch = bundle.match(/^# generated_at=([^\r\n]+)$/m);
+  const sourceMatch = bundle.match(/^# source_sha256=([0-9a-f]{64})$/m);
+  if (!generatedMatch || !sourceMatch) throw new Error('active_dsc_provenance_missing');
+  const generatedAt = Date.parse(generatedMatch[1]);
+  const age = Date.now() - generatedAt;
+  if (!Number.isFinite(generatedAt) || age < -5 * 60 * 1000 || age > ACTIVE_DSC_MAX_AGE_MS) {
+    throw new Error('active_dsc_stale');
+  }
+  const blocks = bundle.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) || [];
+  if (blocks.length < minimumCertificates) {
+    throw new Error('active_dsc_too_small');
+  }
+  const fingerprints = new Set();
+  for (const block of blocks) {
+    const cert = new crypto.X509Certificate(block);
+    if (cert.ca) throw new Error('active_dsc_contains_ca');
+    fingerprints.add(cert.fingerprint256.replace(/:/g, '').toLowerCase());
+  }
+  if (fingerprints.size !== blocks.length) throw new Error('active_dsc_duplicates');
+  activeDscCache = {
+    path: bundlePath,
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    generatedAt,
+    fingerprints,
+  };
+  return fingerprints;
+}
+
+async function requireFreshActiveDSC(
+  signerPath,
+  bundlePath = ACTIVE_DSC_BUNDLE,
+  minimumCertificates = ACTIVE_DSC_MIN_CERTIFICATES
+) {
+  let fingerprints;
+  try {
+    fingerprints = await loadFreshActiveDSCBundle(bundlePath, minimumCertificates);
+  } catch (error) {
+    console.error(`[PA] active DSC bundle unavailable reason=${error.message}`);
+    return { status: 'unavailable', reason: 'active_dsc_unavailable' };
+  }
+  let signer;
+  try {
+    signer = new crypto.X509Certificate(await fs.promises.readFile(signerPath));
+  } catch {
+    return { status: 'failed', reason: 'dsc_malformed' };
+  }
+  const signerFingerprint = signer.fingerprint256.replace(/:/g, '').toLowerCase();
+  if (!fingerprints.has(signerFingerprint)) {
+    return { status: 'failed', reason: 'dsc_not_active' };
+  }
+  return null;
 }
 
 // ── Мінімальний DER/TLV-парсер (лише читання, без залежностей) ──────
@@ -182,6 +339,66 @@ function stripIcaoWrapper(buf) {
   return buf.slice(t.cStart, t.cEnd);
 }
 
+function safeHexEqual(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string' ||
+      !/^[0-9a-f]+$/i.test(left) || !/^[0-9a-f]+$/i.test(right) ||
+      left.length !== right.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
+}
+
+function validateRawDataGroups(rawDataGroups) {
+  if (!rawDataGroups || typeof rawDataGroups !== 'object' || Array.isArray(rawDataGroups)) {
+    throw new Error('raw_dg_shape_invalid');
+  }
+  const names = Object.keys(rawDataGroups).sort();
+  if (!names.includes('dg1') || !names.includes('dg2') ||
+      names.some((name) => !['dg1', 'dg2', 'dg14', 'dg15'].includes(name))) {
+    throw new Error('raw_dg_shape_invalid');
+  }
+  const { dg1, dg2, dg14, dg15 } = rawDataGroups;
+  if (!Buffer.isBuffer(dg1) || dg1.length === 0 || dg1.length > MAX_DG1_BYTES ||
+      !Buffer.isBuffer(dg2) || dg2.length === 0 || dg2.length > MAX_DG2_BYTES ||
+      (dg14 !== undefined &&
+        (!Buffer.isBuffer(dg14) || dg14.length === 0 || dg14.length > MAX_DG14_BYTES)) ||
+      (dg15 !== undefined &&
+        (!Buffer.isBuffer(dg15) || dg15.length === 0 || dg15.length > MAX_DG15_BYTES))) {
+    throw new Error('raw_dg_size_invalid');
+  }
+  return { dg1, dg2, ...(dg14 ? { dg14 } : {}), ...(dg15 ? { dg15 } : {}) };
+}
+
+function hashRawDataGroups(rawDataGroups, algorithm) {
+  const groups = validateRawDataGroups(rawDataGroups);
+  if (!Object.values(HASH_OIDS).some((entry) => entry.name === algorithm)) {
+    throw new Error('raw_dg_hash_algorithm_invalid');
+  }
+  return Object.fromEntries(Object.entries(groups).map(([name, value]) => [
+    name,
+    crypto.createHash(algorithm).update(value).digest('hex'),
+  ]));
+}
+
+const VERIFIABLE_DATA_GROUPS = Object.freeze({
+  dg1: 1,
+  dg2: 2,
+  dg14: 14,
+  dg15: 15,
+});
+
+function normalizeRequiredDataGroups(requiredDataGroups) {
+  const names = requiredDataGroups === undefined
+    ? Object.keys(VERIFIABLE_DATA_GROUPS)
+    : requiredDataGroups;
+  if (!Array.isArray(names) ||
+      names.length !== new Set(names).size ||
+      !names.includes('dg1') ||
+      !names.includes('dg2') ||
+      names.some((name) => VERIFIABLE_DATA_GROUPS[name] === undefined)) {
+    throw new Error('required_dg_policy_invalid');
+  }
+  return new Set(names);
+}
+
 // ── Головна перевірка (async) ───────────────────────────────────────
 //
 // Повертає (НІКОЛИ не кидає):
@@ -189,7 +406,12 @@ function stripIcaoWrapper(buf) {
 //
 // 'failed'      — SOD битий/підроблений/не збігаються хеші → ВІДМОВА.
 // 'unavailable' — проблема КОНФІГУРАЦІЇ сервера (немає masterlist).
-async function verifySOD({ sodBase64, dgHashes }) {
+async function verifySOD({
+  sodBase64,
+  dgHashes,
+  rawDataGroups,
+  requiredDataGroups,
+}) {
   try {
     await acquire();
   } catch {
@@ -200,6 +422,9 @@ async function verifySOD({ sodBase64, dgHashes }) {
   try {
     if (typeof sodBase64 !== 'string' || !sodBase64 || sodBase64.length > MAX_SOD_B64_CHARS) {
       return { status: 'failed', reason: 'sod_missing_or_oversized' };
+    }
+    if (sodBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(sodBase64)) {
+      return { status: 'failed', reason: 'sod_malformed' };
     }
     let sod;
     try {
@@ -228,15 +453,24 @@ async function verifySOD({ sodBase64, dgHashes }) {
     // 1. Цілісність підпису DSC над вмістом (signedAttrs.messageDigest
     //    звіряється з eContent, сам підпис — з сертифікатом підписанта).
     try {
-      await openssl([
+      const verifyArgs = [
         'cms', '-verify', '-inform', 'DER', '-in', cmsPath,
-        '-noverify',
+        '-binary', '-noverify',
         '-out', contentPath,
         '-signer', signerPath,
         '-certsout', certsPath,
-      ]);
-    } catch {
-      return { status: 'failed', reason: 'cms_signature_invalid' };
+      ];
+      // Наш зібраний список DSC — щоб знайти підписанта, якщо його немає
+      // у SOD. Не впливає на довіру: ланцюг DSC→CSCA перевіряється в кроці 3.
+      if (await containsPEMCertificate(DSC_LOOKUP_BUNDLE)) {
+        verifyArgs.push('-certfile', DSC_LOOKUP_BUNDLE);
+      }
+      await openssl(verifyArgs);
+    } catch (e) {
+      const failure = classifyCMSFailure(e.stderr || e.message);
+      // Логуємо стабільний код без SOD, сертифікатів та персональних даних.
+      console.error(`[PA] cms verify failed reason=${failure.reason}`);
+      return failure;
     }
 
     // 2. Хеші DG1/DG2, ПІДПИСАНІ державою, проти хешів клієнта.
@@ -246,36 +480,86 @@ async function verifySOD({ sodBase64, dgHashes }) {
     } catch (e) {
       return { status: 'failed', reason: 'lds_parse_failed' };
     }
-
-    const clientDG1 = dgHashes?.dg1?.[lds.algorithm];
-    const clientDG2 = dgHashes?.dg2?.[lds.algorithm];
-    if (!clientDG1 || !clientDG2) {
-      return { status: 'failed', reason: `client_hash_missing_${lds.algorithm}` };
+    let requiredGroups;
+    try {
+      requiredGroups = normalizeRequiredDataGroups(requiredDataGroups);
+    } catch (e) {
+      return { status: 'failed', reason: e.message || 'required_dg_policy_invalid' };
     }
-    if (String(clientDG1).toLowerCase() !== lds.dgHashes[1] ||
-        String(clientDG2).toLowerCase() !== lds.dgHashes[2]) {
-      return { status: 'failed', reason: 'dg_hash_mismatch', algorithm: lds.algorithm };
+
+    let observed;
+    if (rawDataGroups !== undefined) {
+      try {
+        observed = hashRawDataGroups(rawDataGroups, lds.algorithm);
+      } catch (e) {
+        return { status: 'failed', reason: e.message || 'raw_dg_invalid' };
+      }
+    } else {
+      observed = {};
+      for (const [name, number] of Object.entries(VERIFIABLE_DATA_GROUPS)) {
+        const clientHash = dgHashes?.[name]?.[lds.algorithm];
+        if (requiredGroups.has(name) && lds.dgHashes[number] && !clientHash) {
+          return { status: 'failed', reason: `client_${name}_hash_missing_${lds.algorithm}` };
+        }
+        if (clientHash) observed[name] = String(clientHash).toLowerCase();
+      }
+    }
+    for (const [name, number] of Object.entries(VERIFIABLE_DATA_GROUPS)) {
+      if (requiredGroups.has(name) &&
+          lds.dgHashes[number] &&
+          observed[name] === undefined) {
+        return { status: 'failed', reason: `${name}_evidence_missing`, algorithm: lds.algorithm };
+      }
+      if (observed[name] !== undefined &&
+          (!lds.dgHashes[number] || !safeHexEqual(observed[name], lds.dgHashes[number]))) {
+        return { status: 'failed', reason: `${name}_hash_mismatch`, algorithm: lds.algorithm };
+      }
     }
 
     // 3. Ланцюжок довіри: DSC → запінені CSCA України.
-    if (!fs.existsSync(MASTERLIST)) {
+    if (!await containsPEMCertificate(MASTERLIST)) {
       return { status: 'unavailable', reason: 'masterlist_missing', algorithm: lds.algorithm };
     }
+    const chainArgs = ['verify', '-purpose', 'any', '-CAfile', MASTERLIST];
+    if (NO_CHECK_TIME) chainArgs.push('-no_check_time');
+    // Коли DSC знайдено у зовнішньому bundle, certsout може бути
+    // порожнім. OpenSSL відхиляє `-untrusted` із порожнім PEM.
+    if (await containsPEMCertificate(certsPath)) {
+      chainArgs.push('-untrusted', certsPath);
+    }
+    chainArgs.push(signerPath);
     try {
-      const args = ['verify', '-CAfile', MASTERLIST];
-      if (NO_CHECK_TIME) args.push('-no_check_time');
-      // CRL (revocation): механізм готовий — щойно зʼявиться файл CRL
-      // від офіційного фіда (ICAO PKD / державний DP), перевірка
-      // відкликаних DSC вмикається автоматично. Без файла — ланцюжок
-      // без revocation (чесно задокументовано, threat-model P1-04).
-      const CRL_FILE = process.env.CSCA_CRL || '/app/csca/csca_ua.crl.pem';
-      if (fs.existsSync(CRL_FILE)) {
-        args.push('-crl_check', '-CRLfile', CRL_FILE);
+      // Спочатку окремо доводимо DSC → CSCA. Це не дозволяє помилці
+      // «CRL для іншого issuer» маскувати справжню помилку ланцюжка.
+      await openssl(chainArgs);
+    } catch (e) {
+      return { ...classifyChainFailure(e.stderr || e.message), algorithm: lds.algorithm };
+    }
+
+    // 3b. Revocation — issuer-aware. Якщо наявна CRL покриває signer,
+    // OpenSSL перевіряє її підпис, строк і serial. Якщо bundle містить CRL
+    // лише іншого CSCA, OpenSSL повертає unable-to-get-CRL: тоді не
+    // вимикаємо revocation глобально, а вимагаємо signer у СВІЖОМУ
+    // official active-all snapshot.
+    let needsActiveSnapshot = !await containsPEMCRL(CRL_FILE);
+    if (!needsActiveSnapshot) {
+      const crlArgs = chainArgs.slice(0, -1);
+      crlArgs.push('-crl_check', '-CRLfile', CRL_FILE, signerPath);
+      try {
+        await openssl(crlArgs);
+      } catch (e) {
+        const failure = classifyChainFailure(e.stderr || e.message);
+        if (failure.reason === 'crl_unavailable' &&
+            /unable to get (certificate )?crl/i.test(String(e.stderr || e.message))) {
+          needsActiveSnapshot = true;
+        } else {
+          return { ...failure, algorithm: lds.algorithm };
+        }
       }
-      args.push('-untrusted', certsPath, signerPath);
-      await openssl(args);
-    } catch {
-      return { status: 'failed', reason: 'csca_chain_failed', algorithm: lds.algorithm };
+    }
+    if (needsActiveSnapshot) {
+      const activeFailure = await requireFreshActiveDSC(signerPath);
+      if (activeFailure) return { ...activeFailure, algorithm: lds.algorithm };
     }
 
     // 4. Країна: емітент DSC мусить бути українська CSCA (C=UA).
@@ -283,7 +567,7 @@ async function verifySOD({ sodBase64, dgHashes }) {
     try {
       issuer = (await openssl(['x509', '-in', signerPath, '-noout', '-issuer'])).toString();
     } catch { /* ланцюжок уже перевірено */ }
-    if (REQUIRE_UA && issuer && !/\bC\s*=\s*UA\b/.test(issuer)) {
+    if (REQUIRE_UA && (!issuer || !/\bC\s*=\s*UA\b/.test(issuer))) {
       return { status: 'failed', reason: 'issuer_not_ukraine', issuer: issuer.trim() };
     }
 
@@ -297,12 +581,23 @@ async function verifySOD({ sodBase64, dgHashes }) {
       // для токена «1 документ = 1 акаунт»; не логувати, не зберігати.
       sodDG1Hash: lds.dgHashes[1],
     };
-  } catch (e) {
-    return { status: 'failed', reason: 'exception: ' + e.message };
+  } catch {
+    return { status: 'failed', reason: 'internal_error' };
   } finally {
     if (tmp) { try { await fs.promises.rm(tmp, { recursive: true, force: true }); } catch { /* noop */ } }
     release();
   }
 }
 
-module.exports = { verifySOD, parseLDSSecurityObject, stripIcaoWrapper };
+module.exports = {
+  verifySOD,
+  parseLDSSecurityObject,
+  stripIcaoWrapper,
+  hashRawDataGroups,
+  validateRawDataGroups,
+  normalizeRequiredDataGroups,
+  classifyCMSFailure,
+  classifyChainFailure,
+  loadFreshActiveDSCBundle,
+  requireFreshActiveDSC,
+};

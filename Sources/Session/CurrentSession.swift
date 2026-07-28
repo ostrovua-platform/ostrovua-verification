@@ -23,6 +23,13 @@ final class CurrentSession: ObservableObject {
     /// Без входу в акаунт verified бути НЕ МОЖЕ.
     @Published private(set) var isVerified: Bool = false
 
+    /// Чи ПІДТВЕРДЖЕНО статус бекендом у цій сесії. Кеш «підтверджує»,
+    /// але НЕ «призначає» Verified ID: на старті беремо false і не
+    /// показуємо ні бейдж, ні банер «пройди верифікацію», доки бекенд
+    /// не відповів (інакше відкликаний акаунт світився б зі старого
+    /// кешу, а живий — блимав би банером). Оновлюється у apply().
+    @Published private(set) var statusConfirmed: Bool = false
+
     /// Координатор. ДЖЕРЕЛО ІСТИНИ — БАЗА (contributors.is_coordinator).
     /// Призначає система; з застосунку роль узяти неможливо.
     @Published private(set) var isCoordinator: Bool = false
@@ -147,7 +154,8 @@ final class CurrentSession: ObservableObject {
 
     /// Верифікація пройдена на пристрої. Статус стає Verified ID ЛИШЕ
     /// після підтвердження базою — локально нічого не «вмикається».
-    /// Персональні дані документа НЕ передаються.
+    /// У legacy review-flow персональні дані не передаються. Production v6
+    /// окремо надсилає їх лише self-hosted одноразовому verifier у RAM.
     ///
     /// Повертає true, лише якщо база реально записала verified = true.
     /// Застосунок не має показувати «Verified ID», доки цього не сталося,
@@ -185,6 +193,7 @@ final class CurrentSession: ObservableObject {
     /// Записуємо те, що віддала база
     @MainActor
     private func apply(_ status: (verified: Bool, name: String, isCoordinator: Bool, photoURL: String?)) {
+        statusConfirmed = true          // бекенд відповів — статус визначено
         isVerified = status.verified
         UserDefaults.standard.set(status.verified, forKey: verifiedKey)
 
@@ -213,6 +222,7 @@ final class CurrentSession: ObservableObject {
             // Немає входу — немає ні Verified ID, ні ролі координатора
             isVerified = false
             isCoordinator = false
+            statusConfirmed = true          // визначено: без входу — не verified
             UserDefaults.standard.set(false, forKey: verifiedKey)
             UserDefaults.standard.set(false, forKey: coordinatorKey)
             applyRoles()
@@ -237,9 +247,12 @@ final class CurrentSession: ObservableObject {
         if let saved = UserDefaults.standard.string(forKey: nicknameKey), saved.isEmpty == false {
             displayName = saved
         }
-        // Кеші дійсні лише за наявності токена
-        isVerified = AuthStore.isLoggedIn && UserDefaults.standard.bool(forKey: verifiedKey)
-        isCoordinator = AuthStore.isLoggedIn && UserDefaults.standard.bool(forKey: coordinatorKey)
+        // Verified ID і роль НЕ беремо з кешу — їх «призначає» лише
+        // бекенд (refreshFromBackend/apply). До підтвердження — false,
+        // тож відкликаний статус не «світиться» зі старого кешу.
+        isVerified = false
+        isCoordinator = false
+        statusConfirmed = false
         countryCode = UserDefaults.standard.string(forKey: countryKey)
         if let data = try? Data(contentsOf: avatarURL) {
             avatar = UIImage(data: data)

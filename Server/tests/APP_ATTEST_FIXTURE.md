@@ -1,5 +1,8 @@
 # Реальна assertion-фікстура тестового iPhone (аудит #2)
 
+> Protocol v5: згадка `level=strong` нижче описує історичний fixture v4.
+> Актуальний успіх — `pending_review/document_passive`, `verified=false`.
+
 Мета: дати аудитору ground-truth для перевірки App Attest, а не
 виводити фікстуру зі спеки (звідси хибний висновок про «double hash» —
 див. нижче). Формула сервера ЕМПІРИЧНО коректна: реальні assertion

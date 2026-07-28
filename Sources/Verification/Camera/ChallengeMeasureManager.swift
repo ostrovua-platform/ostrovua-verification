@@ -3,8 +3,7 @@ import AVFoundation
 import Vision
 import Combine
 
-#if DEBUG
-/// DEBUG-менеджер вимірювання активної liveness (аудит #8). ОКРЕМА
+/// Менеджер вимірювання активної liveness (аудит #8). ОКРЕМА
 /// фронтальна камера + VNDetectFaceLandmarksRequest (поза yaw/pitch +
 /// очі для EAR). Production-флоу FaceLivenessManager НЕ чіпає — спершу
 /// міряємо челендж стендом, потім вирішуємо про інтеграцію.
@@ -34,6 +33,10 @@ final class ChallengeMeasureManager: NSObject, ObservableObject {
             }
             self.session.addInput(input)
             self.output.setSampleBufferDelegate(self, queue: self.queue)
+            // 420 bi-planar → площина 0 = Y (яскравість) для ScreenArtifactDetector.
+            self.output.videoSettings = [
+                String(kCVPixelBufferPixelFormatTypeKey): kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            ]
             if self.session.canAddOutput(self.output) { self.session.addOutput(self.output) }
             self.session.commitConfiguration()
             self.session.startRunning()
@@ -47,7 +50,7 @@ final class ChallengeMeasureManager: NSObject, ObservableObject {
     func newAttempt() {
         var seed = Data(count: 16)
         _ = seed.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
-        let c = ActiveLivenessChallenge(seed: seed, length: 3)
+        let c = ActiveLivenessChallenge(seed: seed, length: 2)
         c.start()
         challenge = c
         running = true
@@ -89,9 +92,13 @@ extension ChallengeMeasureManager: AVCaptureVideoDataOutputSampleBufferDelegate 
                 }
             }()
 
+            // Ознаки екрана (муар/висока частота + глар) — вимірюваний
+            // сигнал анти-реплею; пишемо поруч, скоринг оцінить розділення.
+            let art = ScreenArtifactDetector.analyze(pb, faceBox: face.boundingBox)
             // У колонку yaw пишемо horiz (для калібрування), pitch не використовуємо.
             ChallengeLogger.shared.frame(state: self.stateName(challenge.state),
-                                         yaw: horiz, pitch: nil, ear: ear)
+                                         yaw: horiz, pitch: nil, ear: ear,
+                                         glare: art.glareFraction, hf: art.hfEnergy)
 
             let done = challenge.process(horiz: horiz, ear: ear)
             DispatchQueue.main.async { self.guidance = challenge.guidance }
@@ -119,4 +126,3 @@ extension ChallengeMeasureManager: AVCaptureVideoDataOutputSampleBufferDelegate 
         }
     }
 }
-#endif

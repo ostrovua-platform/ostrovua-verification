@@ -1,119 +1,107 @@
-# Що робить сервер при підтвердженні верифікації
+# Серверний контракт Verified ID — protocol v7
 
-> **Джерело істини — [`Server/verify_approve.route.js`](../Server/verify_approve.route.js):**
-> ДОСЛІВНА виписка реального маршруту `/auth/verify/approve` з продакшн
-> `server.js` (з ланцюгом App Attest: rawBody-захоплення, challenge,
-> `verifyAssertion`, атомарний counter). Фрагмент нижче — стислий огляд,
-> НЕ дослівний код (раніше формулювання «byte-for-byte» було неточним —
-> виправлено, аудит F1). Passive Authentication —
-> [`Server/passiveauth.js`](../Server/passiveauth.js).
+Джерела істини:
 
-```js
-// 1. Авторизація: JWT користувача (contributor_id — з клеймів)
-// 2. App Attest: assertion перевіряється над hash(challenge ‖ rawBody),
-//    counter (compare-and-swap) захищає від replay. rawBody — дослівні
-//    байти тіла, захоплені express.json { verify } ДО парсингу.
-const okAttest = await verifyDeviceAttestation(req, contributorId);
-if (!okAttest) return res.status(403).json({ error: 'Device attestation required' });
+- [`verify_approve.route.js`](../Server/verify_approve.route.js);
+- [`passiveauth.js`](../Server/passiveauth.js);
+- [`verification_policy.js`](../Server/verification_policy.js);
+- [`self_hosted_contract.js`](../Server/self_hosted_contract.js);
+- [`biometric_service`](../Server/biometric_service/);
+- міграції
+  [`20260724_document_assurance_v7.sql`](../Server/migrations/20260724_document_assurance_v7.sql)
+  і
+  [`20260724_verification_rate_limit_fail_closed.sql`](../Server/migrations/20260724_verification_rate_limit_fail_closed.sql).
 
-// 3. СТРОГА СХЕМА (F3): НЕВІДОМІ ключі відхиляються ЯВНО — сама
-//    деструктуризація JS їх не ловить. Дозволений рівно цей набір.
-const ALLOWED_KEYS = new Set(['method','liveness','faceMatch','faceModel',
-  'sod','dgHashes','protocolVersion','endpoint','challengeId','session']);
-if (Object.keys(req.body || {}).some(k => !ALLOWED_KEYS.has(k)))
-  return res.status(400).json({ error: 'Невідомі поля payload' });
+Protocol v6 та envelope v1/v2 більше не є production-сумісними. Історичні
+записи БД можуть залишатися для аудиту, але жоден HTTP route не приймає
+старий challenge, payload або envelope.
 
-const { method, session, liveness, faceMatch, faceModel, sod, dgHashes,
-        protocolVersion, endpoint, challengeId } = req.body || {};
+## Послідовність рішення
 
-if (method !== 'nfc_passport')                        return res.status(400).json({ error: '…' });
-if (protocolVersion !== 3)                            return res.status(400).json({ error: '…' });
-if (endpoint !== '/auth/verify/approve')              return res.status(400).json({ error: '…' });
-if (typeof challengeId !== 'string' || !challengeId)  return res.status(400).json({ error: '…' }); // F2
-if (session !== undefined && typeof session !== 'string') return res.status(400).json({ error: '…' });
-if (faceMatch !== 'passed' || faceModel !== 'coreml') return res.status(400).json({ error: '…' });
-// ПОЛІТИКА: єдиний рівень видачі — depth-backed strong.
-if (liveness !== 'depth') {
-  return res.status(400).json({ error: 'Для верифікації потрібен пристрій з Face ID (TrueDepth).' });
-}
-if (typeof sod !== 'string' || sod.length === 0 || sod.length > 96*1024)
-  return res.status(400).json({ error: 'SOD відсутній або завеликий' });
-if (!isValidDgHashes(dgHashes)) return res.status(400).json({ error: '…' }); // {dg1,dg2}, hex за алгоритмом
-// … + перевірка форми dgHashes
+1. iOS реєструє App Attest key до початку NFC.
+2. Сервер видає два різні одноразові nonce: `document_auth` і `liveness`.
+   Persistent limiter перевіряє account + App-Attest device. Втрата
+   PostgreSQL або неповна limiter identity дає `503`, а не fallback.
+3. NFC читає COM, SOD, DG1, DG2, а також DG14/DG15, якщо вони є.
+4. Для DG15 клієнт виконує AA над 8-байтовим challenge, детерміновано
+   виведеним зі свіжого серверного `document_auth` nonce. Сервер повторно
+   виводить challenge, читає державою підписаний DG15 public key і сам
+   перевіряє RSA/ECDSA-підпис. Поле `activeAuthentication=passed` саме по
+   собі нічого не дозволяє.
+5. Для DG14 бібліотека NFC виконує CA. Сирий DG14 входить до SOD-перевірки,
+   а результат CA входить у challenge-bound AES-GCM envelope і в точні байти
+   App Attest assertion. Сервер вимагає наявність CA public-key security info
+   у DG14 та збіг незалежно підписаних станів. Поточна upstream-бібліотека не
+   повертає ephemeral key/secure-messaging transcript, тому цей результат
+   позначається `chip_authentication_attested` і не дозволяє auto-activation.
+6. Клієнт шифрує DG1/DG2/DG14/DG15, DG2 portrait, neutral/challenge frames
+   і AA transcript у `self-hosted-envelope-v3` через X25519/HKDF-SHA256/
+   AES-256-GCM. Auth бачить лише ciphertext.
+7. Auth споживає обидва nonce рівно один раз, перевіряє App Attest assertion
+   над точними request bytes і assertion counter.
+8. Auth надсилає envelope до приватного worker як
+   `self-hosted-forward-v2`. Запит має HMAC, timestamp і випадковий nonce.
+   Process-shared replay-cache атомарно споживає nonce; недоступний cache
+   відхиляє запит.
+9. Одноразовий worker розшифровує evidence, сам обчислює DG hashes,
+   перевіряє AA, CA capability/attested state, face match, passive PAD,
+   TrueDepth і активний challenge. Він повертає підписану HMAC-квитанцію.
+10. Auth звіряє worker hashes із App-Attest-підписаними hashes, а потім
+    перевіряє SOD, CMS, DSC → pinned CSCA та revocation status. Якщо SOD
+    підписує DG14/DG15, відсутність відповідного raw DG є відмовою.
+11. Одна транзакційна v7-функція з advisory locks перевіряє account,
+    ban, duplicate document і записує assurance.
 
-// 4. Passive Authentication — ОБОВʼЯЗКОВА. «Basic»-видачі без PA
-//    не існує: немає криптодоказу справжності документа — немає
-//    Verified ID. Період розкатки завершено.
-const pa = await passiveauth.verifySOD({ sodBase64: sod, dgHashes });
-if (pa.status !== 'passed') {
-  return res.status(pa.status === 'unavailable' ? 503 : 400)
-            .json({ error: 'Документ не пройшов криптографічну перевірку справжності' });
-}
+## Assurance policy
 
-// 5. «Один документ = один акаунт» + бан документа (fail-closed):
-//    token = HMAC-SHA256(pepper, державний хеш DG1 із SOD).
-//    Жодного персонального поля; відновити дані з токена неможливо.
-const docToken = crypto.createHmac('sha256', DOC_PEPPER)
-  .update('doc-token-v1:' + pa.sodDG1Hash).digest('hex');
+| Доказ документа | Результат |
+|---|---|
+| PA + server-verified AA | `active_authentication`; може перейти до auto-activation після calibration gate |
+| PA + CA status, DG14 у SOD, state bound to App Attest, без server-verifiable transcript | `chip_authentication_attested`; тільки `pending_review` |
+| Лише PA, документ без AA | `passive_only`; тільки `pending_review` |
+| DG15 є, але AA не пройдено | Відмова |
+| DG14 містить CA key, але CA не пройдено | Відмова |
 
-const dt = await hasuraAdmin(/* byToken + byContributor lookup */);
-const existing = dt.byToken?.[0];
-if (existing?.status === 'banned')
-  return res.status(403).json({ error: 'Цей документ заблоковано за порушення правил спільноти.' });
-if (existing?.contributor_id && existing.contributor_id !== contributorId)
-  return res.status(409).json({ error: 'Цей документ уже використано для верифікації іншого акаунта.' });
-// … звільнення старого токена при зміні паспорта + upsert привʼязки
-// (повна логіка — у продакшн-обробнику; без робочої дедуплікації
-// Verified ID не видається — 503)
+App Attest-bound CA status сильніше за вільний client boolean, але це ще не
+серверна перевірка CA. Відповідно до TR-03110, доказ має спиратися на
+ephemeral-static key agreement та успішний secure messaging під новими
+session keys. До форку NFC-бібліотеки, передачі мінімального перевірюваного
+транскрипту та незалежного review CA-only документ не отримує Verified ID
+автоматично. Складний live relay також лишається окремим residual risk.
 
-// Єдиний рівень: strong. Типізована колонка identity_assurance —
-// authorization boundary, а не парсинг method-рядка.
-const level = 'strong';
-const storedMethod = method + '+pa+depth';
+## Дані та межа очищення
 
-// 6. Запис у базу: прапорець, дата, метод, рівень. SOD НЕ зберігається —
-//    тимчасова тека видаляється одразу після перевірки.
-await hasuraAdmin(
-  `mutation($id: uuid!, $m: String!, $at: timestamptz!, $a: String!) {
-     update_contributors_by_pk(pk_columns:{id:$id},
-       _set:{ verified:true, verified_at:$at, verification_method:$m,
-              identity_assurance:$a }) { id }
-   }`,
-  { id: contributorId, m: storedMethod, at: new Date().toISOString(), a: level }
-);
+Auth тимчасово тримає SOD, DG hashes, ciphertext та nonce, але не plaintext
+DG або зображення. Plaintext існує лише в RAM worker з `max_requests=1`.
+Mutable buffers затираються в `finally`, після відповіді ОС знищує address
+space. Production runtime також вимагає:
 
-return res.json({ ok: true, verified: true, level, passiveAuthentication: pa.status });
-```
+- read-only rootfs і приватний `tmpfs`;
+- `RLIMIT_CORE=0`, без swap;
+- `cap_drop: ALL`, `no-new-privileges`;
+- internal network без published biometric port;
+- вимкнені access/body logs;
+- filesystem nonce-cache з mode `0700`, спільний для worker-процесів.
 
-У таблиці `contributors` після верифікації зʼявляються чотири значення:
+Після успіху зберігаються лише peppered document token, стан Verified ID та
+мінімальний receipt: request UUID, policy/model hashes, HMAC receipt,
+timestamp, protocol v7 і `document_assurance`. MRZ, номер документа, DG,
+фотографії, embeddings та biometric scores не зберігаються.
 
-| Поле                  | Приклад                    |
-|-----------------------|----------------------------|
-| `verified`            | `true`                     |
-| `verified_at`         | `2026-07-20T12:00:00Z`     |
-| `verification_method` | `nfc_passport+pa+depth`    |
-| `identity_assurance`  | `strong`                   |
+## Калібрування та rollout
 
-`+pa` — справжність даних чипа доведена криптографічно (Passive
-Authentication за запіненими CSCA України); `+depth` — жива
-присутність підтверджена мапою глибини TrueDepth. Інших рівнів
-видачі не існує: без PA або без depth верифікація не проходить.
+Production worker не повертає `passed`, доки exact aggregate report:
 
-Полів для номера документа, імені з паспорта, дати народження,
-громадянства чи фото в схемі бази **не існує** — зберігати їх нікуди,
-навіть якби застосунок їх надіслав (а він не надсилає). SOD після
-перевірки видаляється.
+- не пройшов Ed25519-перевірку;
+- не збігається SHA-256 report ID;
+- не збігається model-set hash;
+- не збігається policy version;
+- не має достатніх незалежних APCER/BPCER та FMR/FNMR вимірів.
 
-Додатково зберігається **токен документа** (`document_tokens`):
-`HMAC-SHA256(секретний pepper, хеш DG1 із SOD)` — односторонній,
-без жодного персонального поля. Призначення: «один паспорт = один
-акаунт» і бан документа за порушення правил. Відновити з токена
-дані документа неможливо; pepper зберігається поза базою.
-Деталі і чесні межі — threat-model.md.
+Shadow lane доступний лише server-side allowlist, завжди повертає
+`evaluationOnly=true` і завершується до document token та будь-якої мутації
+БД. Він корисний для збору фізичних вимірів, але не є підставою для
+production activation.
 
-## CSCA masterlist
-
-Довірені корені — masterlist ICAO PKD (або німецький BSI /
-нідерландський NPKD), відфільтрований до `C=UA`:
-`Server/fetch_masterlist.sh` + `Server/extract_certs.py`.
-Оновлення — раз на пів року (держави ротують CSCA).
+Повний gate та поетапний rollout:
+[`PRODUCTION_RELEASE_GATE_V7.md`](../Provenance/PRODUCTION_RELEASE_GATE_V7.md).
