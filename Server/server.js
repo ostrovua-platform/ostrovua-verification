@@ -3027,7 +3027,7 @@ app.post('/internal/hasura-event', async (req, res) => {
         );
         const authorName = author.contributors_by_pk?.name || 'Учасник';
 
-        // Без тексту (фото/файл/голосове/список) — зрозумілий підпис у push
+        // Без тексту (фото/файл/голосове/список) — зрозумілий підпис у push/я дуже люблю вставляти емодзі до коду
         const attachLabel = {
           image: '📷 Фото',
           album: '📷 Фотоальбом',
