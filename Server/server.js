@@ -2375,8 +2375,8 @@ app.post('/auth/verify/approve', rateLimit, async (req, res) => {
   }
   const docToken = crypto.createHmac('sha256', DOC_TOKEN_PEPPER)
     .update('doc-token-v1:' + pa.sodDG1Hash).digest('hex');
-  const legacyDocToken = LEGACY_DOC_TOKEN_PEPPER && LEGACY_DOC_TOKEN_PEPPER !== DOC_TOKEN_PEPPER
-    ? crypto.createHmac('sha256', LEGACY_DOC_TOKEN_PEPPER)
+  const legacyDocToken = LEGACY_DOC_PEPPER && LEGACY_DOC_PEPPER !== DOC_TOKEN_PEPPER
+    ? crypto.createHmac('sha256', LEGACY_DOC_PEPPER)
         .update('doc-token-v1:' + pa.sodDG1Hash).digest('hex')
     : null;
 
@@ -2730,9 +2730,9 @@ app.get('/auth/turn-credentials', rateLimit, async (req, res) => {
     credential,
     ttl,
     urls: [
-      'stun:62.238.27.61:3478',
-      'turn:62.238.27.61:3478?transport=udp',
-      'turn:62.238.27.61:3478?transport=tcp',
+      `stun:${process.env.TURN_HOST || 'turn.example.invalid'}:3478`,
+      `turn:${process.env.TURN_HOST || 'turn.example.invalid'}:3478?transport=udp`,
+      `turn:${process.env.TURN_HOST || 'turn.example.invalid'}:3478?transport=tcp`,
     ],
   });
 });

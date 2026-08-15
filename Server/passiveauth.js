@@ -51,7 +51,32 @@ const CRL_FILE = process.env.CSCA_CRL || '/app/csca/csca_ua.crl.pem';
 // швидко протухає: це обмежує revocation window і не перетворює bundle на
 // безстроковий trust store.
 const ACTIVE_DSC_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-const ACTIVE_DSC_MIN_CERTIFICATES = 90;
+// Мінімум сертифікатів у active-снапшоті. Повний набір ЧИННИХ UA DSC в
+// ICAO PKD станом на 07-08.2026 = 60 (усі — покоління CSCA-2024), тому
+// поріг конфігурується: PA_ACTIVE_DSC_MIN у compose (дефолт там 40).
+// Захист від опечаток: приймається лише ціле 30..500, інакше консервативні
+// 90 (fail-closed у бік суворості). Історія: 06.08.2026 деплой старої копії
+// файлу БЕЗ цього прапорця повернув жорсткі 90 → active_dsc_too_small на
+// проді при валідних 60 сертифікатах.
+const ACTIVE_DSC_MIN_CERTIFICATES = (() => {
+  const raw = process.env.PA_ACTIVE_DSC_MIN;
+  if (raw === undefined || raw === '') return 90;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 30 && value <= 500 ? value : 90;
+})();
+// Політика ревокації (PA_REVOCATION_MODE):
+//  strict      — signer ЗАВЖДИ мусить бути у свіжому active-снапшоті,
+//                навіть якщо CRL його покриває (лише чинні DSC).
+//  best_effort — якщо опублікована CRL покриває покоління підписанта,
+//                достатньо CRL-перевірки (UA публікує CRL лише для
+//                CSCA-2015/2020; покоління 2024 без CRL все одно проходить
+//                через active-снапшот). Це дозволяє старші, ще валідні
+//                паспорти, підписані DSC поза активним PKD-набором.
+// Невідоме значення = strict (fail-closed).
+const REVOCATION_MODE =
+  (process.env.PA_REVOCATION_MODE || 'strict').trim().toLowerCase() === 'best_effort'
+    ? 'best_effort'
+    : 'strict';
 // Вимкнення перевірки строку дії DSC — FAIL-CLOSED (аудит P1-01):
 // дозволено ЛИШЕ при ЯВНОМУ APP_ENV=development. Будь-яка опечатка
 // в APP_ENV трактується як production і НЕ вмикає no_check_time.
@@ -378,25 +403,250 @@ function hashRawDataGroups(rawDataGroups, algorithm) {
   ]));
 }
 
-const VERIFIABLE_DATA_GROUPS = Object.freeze({
-  dg1: 1,
-  dg2: 2,
-  dg14: 14,
-  dg15: 15,
-});
+// ── SID-tolerant fallback: причуда Держзнака з порядком RDN ─────────
+// У SOD старших ліній UA issuer всередині SignerInfo.sid закодований з
+// ІНШИМ порядком RDN, ніж issuer у самому DSC (C,O,OU,CN,serialNumber
+// проти C,serialNumber,O,OU,CN). OpenSSL матчить підписанта побайтово
+// (X509_NAME_cmp зберігає порядок RDN) і віддає «signer certificate not
+// found», хоча сертифікат лежить у lookup. Fallback:
+//   1) парсить CMS нашим DER-рідером (лише читання, без залежностей);
+//   2) шукає в lookup кандидатів за серійником + ПОВНИМ збігом МНОЖИНИ
+//      атрибутів issuer (незалежно від порядку RDN);
+//   3) вручну перевіряє підпис: hash(eContent)==messageDigest у
+//      signedAttrs ТА підпис над DER(signedAttrs) ключем кандидата;
+//   4) віддає eContent+signer у ЗВИЧАЙНИЙ конвеєр: ланцюжок до
+//      запінених CSCA, revocation/active, C=UA — НІЩО не послаблюється.
+// Fail-closed: будь-яка несподіванка → null → лишається dsc_not_found.
 
-function normalizeRequiredDataGroups(requiredDataGroups) {
-  const names = requiredDataGroups === undefined
-    ? Object.keys(VERIFIABLE_DATA_GROUPS)
-    : requiredDataGroups;
-  if (!Array.isArray(names) ||
-      names.length !== new Set(names).size ||
-      !names.includes('dg1') ||
-      !names.includes('dg2') ||
-      names.some((name) => VERIFIABLE_DATA_GROUPS[name] === undefined)) {
-    throw new Error('required_dg_policy_invalid');
+const SIG_ALG_OIDS = {
+  '1.2.840.113549.1.1.5': 'sha1',
+  '1.2.840.113549.1.1.11': 'sha256',
+  '1.2.840.113549.1.1.12': 'sha384',
+  '1.2.840.113549.1.1.13': 'sha512',
+};
+const DN_OID_NAMES = {
+  '2.5.4.3': 'CN', '2.5.4.5': 'serialNumber', '2.5.4.6': 'C',
+  '2.5.4.7': 'L', '2.5.4.8': 'ST', '2.5.4.10': 'O', '2.5.4.11': 'OU',
+};
+
+function childrenWithOffsets(buf, node) {
+  const out = [];
+  let p = node.cStart;
+  while (p < node.cEnd) {
+    const t = tlv(buf, p);
+    out.push({ start: p, t });
+    p = t.end;
   }
-  return new Set(names);
+  return out;
+}
+
+function decodeDirectoryString(buf, node) {
+  // PrintableString / UTF8String / IA5String / T61String; інше — відмова
+  if (![0x13, 0x0c, 0x16, 0x14].includes(node.firstByte)) {
+    throw new Error('DN: тип рядка не підтримано');
+  }
+  return buf.slice(node.cStart, node.cEnd).toString('utf8');
+}
+
+function normalizeDNValue(value) {
+  return value.normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+// Name (SEQUENCE OF RDN) → відсортований список "OID:нормалізоване значення"
+function dnAttributeSet(buf, nameNode) {
+  const out = [];
+  for (const rdn of children(buf, nameNode)) {
+    if (rdn.firstByte !== 0x31) throw new Error('DN: очікував SET');
+    for (const atv of children(buf, rdn)) {
+      if (atv.firstByte !== 0x30) throw new Error('DN: очікував SEQUENCE');
+      const parts = children(buf, atv);
+      if (parts.length !== 2 || parts[0].firstByte !== 0x06) {
+        throw new Error('DN: битий атрибут');
+      }
+      out.push(
+        `${decodeOID(buf, parts[0])}:` +
+        normalizeDNValue(decodeDirectoryString(buf, parts[1]))
+      );
+    }
+  }
+  if (!out.length) throw new Error('DN: порожнє імʼя');
+  return out.sort();
+}
+
+// issuer із Node X509Certificate ("C=UA\nO=…") → той самий формат множини.
+// Невідомий атрибут/формат → null → кандидат відхиляється (fail-closed).
+function certIssuerAttributeSet(cert) {
+  const inverse = Object.fromEntries(
+    Object.entries(DN_OID_NAMES).map(([oid, nm]) => [nm, oid])
+  );
+  const out = [];
+  for (const line of cert.issuer.split('\n')) {
+    if (!line) continue;
+    const idx = line.indexOf('=');
+    if (idx <= 0) return null;
+    const key = line.slice(0, idx);
+    const oid = inverse[key] || (/^[0-9.]+$/.test(key) ? key : null);
+    if (!oid) return null;
+    out.push(`${oid}:${normalizeDNValue(line.slice(idx + 1))}`);
+  }
+  return out.length ? out.sort() : null;
+}
+
+function sameAttributeSet(a, b) {
+  if (!a || !b || a.length === 0 || a.length !== b.length) return false;
+  return a.every((value, i) => value === b[i]);
+}
+
+// Мінімальний парсер CMS SignedData: РІВНО один SignerInfo із signedAttrs.
+function parseCMSForFallback(cmsBuf) {
+  const root = tlv(cmsBuf, 0);
+  if (root.firstByte !== 0x30 || root.end !== cmsBuf.length) {
+    throw new Error('CMS: не ContentInfo');
+  }
+  const ci = childrenWithOffsets(cmsBuf, root);
+  if (ci.length !== 2 || ci[0].t.firstByte !== 0x06 || ci[1].t.firstByte !== 0xa0) {
+    throw new Error('CMS: битий ContentInfo');
+  }
+  if (decodeOID(cmsBuf, ci[0].t) !== '1.2.840.113549.1.7.2') {
+    throw new Error('CMS: не SignedData');
+  }
+  const sdNode = tlv(cmsBuf, ci[1].t.cStart);
+  if (sdNode.firstByte !== 0x30) throw new Error('CMS: битий SignedData');
+  const sd = childrenWithOffsets(cmsBuf, sdNode);
+  if (sd.length < 4) throw new Error('CMS: замало полів SignedData');
+
+  const encap = sd[2].t;
+  if (encap.firstByte !== 0x30) throw new Error('CMS: битий encapContentInfo');
+  const encapKids = childrenWithOffsets(cmsBuf, encap);
+  if (encapKids.length !== 2 || encapKids[0].t.firstByte !== 0x06 ||
+      encapKids[1].t.firstByte !== 0xa0) {
+    throw new Error('CMS: немає eContent');
+  }
+  const eContentType = decodeOID(cmsBuf, encapKids[0].t);
+  const octet = tlv(cmsBuf, encapKids[1].t.cStart);
+  if (octet.firstByte !== 0x04) throw new Error('CMS: eContent не OCTET STRING');
+  const eContent = cmsBuf.slice(octet.cStart, octet.cEnd);
+
+  const siSet = sd[sd.length - 1].t;
+  if (siSet.firstByte !== 0x31) throw new Error('CMS: немає signerInfos');
+  const signers = childrenWithOffsets(cmsBuf, siSet);
+  if (signers.length !== 1) throw new Error('CMS: очікував рівно одного підписанта');
+  const si = childrenWithOffsets(cmsBuf, signers[0].t);
+  if (si.length < 6 || si[0].t.firstByte !== 0x02) throw new Error('CMS: битий SignerInfo');
+  let version = 0;
+  for (let i = si[0].t.cStart; i < si[0].t.cEnd; i++) {
+    version = version * 256 + cmsBuf[i];
+  }
+  if (version !== 1) throw new Error('CMS: sid не issuerAndSerialNumber');
+
+  const sid = si[1].t;
+  if (sid.firstByte !== 0x30) throw new Error('CMS: битий sid');
+  const sidKids = childrenWithOffsets(cmsBuf, sid);
+  if (sidKids.length !== 2 || sidKids[0].t.firstByte !== 0x30 ||
+      sidKids[1].t.firstByte !== 0x02) {
+    throw new Error('CMS: битий issuerAndSerialNumber');
+  }
+  const sidIssuerSet = dnAttributeSet(cmsBuf, sidKids[0].t);
+  const serialHex =
+    (cmsBuf.slice(sidKids[1].t.cStart, sidKids[1].t.cEnd).toString('hex')
+      .replace(/^0+/, '') || '0');
+
+  const digestAlgKids = children(cmsBuf, si[2].t);
+  if (!digestAlgKids.length || digestAlgKids[0].firstByte !== 0x06) {
+    throw new Error('CMS: битий digestAlgorithm');
+  }
+  const digestAlg = HASH_OIDS[decodeOID(cmsBuf, digestAlgKids[0])];
+  if (!digestAlg) throw new Error('CMS: невідомий digest-алгоритм');
+
+  const attrsEntry = si[3];
+  if (attrsEntry.t.firstByte !== 0xa0) throw new Error('CMS: немає signedAttrs');
+  // Підпис рахується над DER signedAttrs з тегом SET (0x31) замість [0]
+  const attrsRaw = Buffer.from(cmsBuf.slice(attrsEntry.start, attrsEntry.t.end));
+  attrsRaw[0] = 0x31;
+
+  let attrContentType = null;
+  let messageDigest = null;
+  for (const attr of children(cmsBuf, attrsEntry.t)) {
+    if (attr.firstByte !== 0x30) throw new Error('CMS: битий атрибут');
+    const kids = childrenWithOffsets(cmsBuf, attr);
+    if (kids.length !== 2 || kids[0].t.firstByte !== 0x06 ||
+        kids[1].t.firstByte !== 0x31) continue;
+    const attrOid = decodeOID(cmsBuf, kids[0].t);
+    const values = childrenWithOffsets(cmsBuf, kids[1].t);
+    if (attrOid === '1.2.840.113549.1.9.3') {
+      if (values.length !== 1 || values[0].t.firstByte !== 0x06) {
+        throw new Error('CMS: битий contentType');
+      }
+      attrContentType = decodeOID(cmsBuf, values[0].t);
+    } else if (attrOid === '1.2.840.113549.1.9.4') {
+      if (values.length !== 1 || values[0].t.firstByte !== 0x04) {
+        throw new Error('CMS: битий messageDigest');
+      }
+      messageDigest = cmsBuf.slice(values[0].t.cStart, values[0].t.cEnd);
+    }
+  }
+  if (!attrContentType || !messageDigest) {
+    throw new Error('CMS: немає contentType/messageDigest');
+  }
+  if (attrContentType !== eContentType) {
+    throw new Error('CMS: contentType не збігається з eContentType');
+  }
+
+  const sigAlgKids = children(cmsBuf, si[4].t);
+  if (!sigAlgKids.length || sigAlgKids[0].firstByte !== 0x06) {
+    throw new Error('CMS: битий signatureAlgorithm');
+  }
+  const sigHash = SIG_ALG_OIDS[decodeOID(cmsBuf, sigAlgKids[0])];
+  if (!sigHash) throw new Error('CMS: підпис не PKCS#1 v1.5 RSA');
+  const sigNode = si[5].t;
+  if (sigNode.firstByte !== 0x04) throw new Error('CMS: битий підпис');
+  const signature = cmsBuf.slice(sigNode.cStart, sigNode.cEnd);
+
+  return {
+    eContent, digestAlg, sidIssuerSet, serialHex,
+    attrsRaw, messageDigest, sigHash, signature,
+  };
+}
+
+// null = fallback не застосовний (лишається dsc_not_found). Ніколи не кидає.
+async function trySidTolerantVerify(cmsBuf) {
+  try {
+    const parsed = parseCMSForFallback(cmsBuf);
+    // Хеш eContent мусить збігатися з ПІДПИСАНИМ messageDigest ще до
+    // будь-якого пошуку кандидатів (fail-fast).
+    const digest = crypto.createHash(parsed.digestAlg.name)
+      .update(parsed.eContent).digest();
+    if (digest.length !== parsed.messageDigest.length ||
+        !crypto.timingSafeEqual(digest, parsed.messageDigest)) return null;
+
+    const stat = await fs.promises.stat(DSC_LOOKUP_BUNDLE);
+    if (stat.size <= 0 || stat.size > 4 * 1024 * 1024) return null;
+    const bundle = await fs.promises.readFile(DSC_LOOKUP_BUNDLE, 'utf8');
+    const blocks = bundle.match(
+      /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) || [];
+
+    for (const block of blocks) {
+      let cert;
+      try { cert = new crypto.X509Certificate(block); } catch { continue; }
+      const certSerial = cert.serialNumber.toLowerCase().replace(/^0+/, '') || '0';
+      if (certSerial !== parsed.serialHex.toLowerCase()) continue;
+      if (cert.ca) continue;                       // підписант — лише end-entity
+      if (!sameAttributeSet(certIssuerAttributeSet(cert), parsed.sidIssuerSet)) {
+        continue;
+      }
+      // Вирішальна перевірка: підпис над signedAttrs ключем кандидата.
+      let ok = false;
+      try {
+        ok = crypto.verify(
+          parsed.sigHash, parsed.attrsRaw, cert.publicKey, parsed.signature);
+      } catch { ok = false; }
+      if (!ok) continue;
+      return { eContent: parsed.eContent, signerPem: block, serialHex: parsed.serialHex };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ── Головна перевірка (async) ───────────────────────────────────────
@@ -406,12 +656,14 @@ function normalizeRequiredDataGroups(requiredDataGroups) {
 //
 // 'failed'      — SOD битий/підроблений/не збігаються хеші → ВІДМОВА.
 // 'unavailable' — проблема КОНФІГУРАЦІЇ сервера (немає masterlist).
-async function verifySOD({
-  sodBase64,
-  dgHashes,
-  rawDataGroups,
-  requiredDataGroups,
-}) {
+async function verifySOD({ sodBase64, dgHashes, rawDataGroups, evaluationOnly = false }) {
+  // evaluationOnly — калібрувальна смуга (Тест PAD; вирішує СЕРВЕР за
+  // verificationMode==='calibration' + allow-list, НЕ клієнт): клієнт там
+  // читає лише DG1/DG2, тому наявні у SOD DG14/DG15 не вимагаються як
+  // evidence. Підпис SOD, ланцюжок DSC→CSCA, revocation та хеші DG1/DG2
+  // перевіряються ПОВНІСТЮ. Production іде з evaluationOnly=false — суворо.
+  const optionalInEvaluation =
+    evaluationOnly === true ? new Set(['dg14', 'dg15']) : new Set();
   try {
     await acquire();
   } catch {
@@ -470,7 +722,40 @@ async function verifySOD({
       const failure = classifyCMSFailure(e.stderr || e.message);
       // Логуємо стабільний код без SOD, сертифікатів та персональних даних.
       console.error(`[PA] cms verify failed reason=${failure.reason}`);
-      return failure;
+      let recovered = false;
+      if (failure.reason === 'dsc_not_found') {
+        // Діагностика прогалини PKD-покриття: issuer+serial ПІДПИСАНТА —
+        // це ідентифікатор ДЕРЖАВНОГО сертифіката (DSC), спільний для
+        // тисяч документів; персональних даних тут немає. Без нього
+        // неможливо зрозуміти, якого саме DSC бракує в bundle.
+        // Блок суто діагностичний: на рішення PA не впливає.
+        try {
+          const dump = await openssl(
+            ['cms', '-inform', 'DER', '-in', cmsPath, '-cmsout', '-print']
+          );
+          const sid = dump.toString('utf8').match(
+            /issuerAndSerialNumber:\s*\n\s*issuer:\s*([^\n]+)\n\s*serialNumber:\s*([^\n]+)/i
+          );
+          console.error(
+            `[PA] missing signer issuer="${sid ? sid[1].trim() : 'unknown'}" ` +
+            `serial=${sid ? sid[2].trim() : 'unknown'}`
+          );
+        } catch {
+          console.error('[PA] missing signer sid=unavailable');
+        }
+        // Причуда Держзнака: sid з іншим порядком RDN, ніж у сертифікаті.
+        const fallback = await trySidTolerantVerify(cms);
+        if (fallback) {
+          await fs.promises.writeFile(contentPath, fallback.eContent);
+          await fs.promises.writeFile(signerPath, fallback.signerPem);
+          console.error(
+            `[PA] sid-tolerant signer accepted serial=0x${fallback.serialHex} ` +
+            '(RDN-order quirk); ланцюжок, revocation і active перевіряються далі як завжди'
+          );
+          recovered = true;
+        }
+      }
+      if (!recovered) return failure;
     }
 
     // 2. Хеші DG1/DG2, ПІДПИСАНІ державою, проти хешів клієнта.
@@ -479,12 +764,6 @@ async function verifySOD({
       lds = parseLDSSecurityObject(await fs.promises.readFile(contentPath));
     } catch (e) {
       return { status: 'failed', reason: 'lds_parse_failed' };
-    }
-    let requiredGroups;
-    try {
-      requiredGroups = normalizeRequiredDataGroups(requiredDataGroups);
-    } catch (e) {
-      return { status: 'failed', reason: e.message || 'required_dg_policy_invalid' };
     }
 
     let observed;
@@ -496,18 +775,22 @@ async function verifySOD({
       }
     } else {
       observed = {};
-      for (const [name, number] of Object.entries(VERIFIABLE_DATA_GROUPS)) {
+      for (const [name, number] of Object.entries(
+        { dg1: 1, dg2: 2, dg14: 14, dg15: 15 }
+      )) {
         const clientHash = dgHashes?.[name]?.[lds.algorithm];
-        if (requiredGroups.has(name) && lds.dgHashes[number] && !clientHash) {
+        if (lds.dgHashes[number] && !clientHash) {
+          if (optionalInEvaluation.has(name)) continue;
           return { status: 'failed', reason: `client_${name}_hash_missing_${lds.algorithm}` };
         }
         if (clientHash) observed[name] = String(clientHash).toLowerCase();
       }
     }
-    for (const [name, number] of Object.entries(VERIFIABLE_DATA_GROUPS)) {
-      if (requiredGroups.has(name) &&
-          lds.dgHashes[number] &&
-          observed[name] === undefined) {
+    for (const [name, number] of Object.entries(
+      { dg1: 1, dg2: 2, dg14: 14, dg15: 15 }
+    )) {
+      if (lds.dgHashes[number] && observed[name] === undefined) {
+        if (optionalInEvaluation.has(name)) continue;
         return { status: 'failed', reason: `${name}_evidence_missing`, algorithm: lds.algorithm };
       }
       if (observed[name] !== undefined &&
@@ -557,6 +840,9 @@ async function verifySOD({
         }
       }
     }
+    // strict: навіть покритий CRL-ом signer мусить бути в active-снапшоті.
+    // best_effort лишає CRL-перевірку достатньою для покритих поколінь.
+    if (REVOCATION_MODE === 'strict') needsActiveSnapshot = true;
     if (needsActiveSnapshot) {
       const activeFailure = await requireFreshActiveDSC(signerPath);
       if (activeFailure) return { ...activeFailure, algorithm: lds.algorithm };
@@ -595,9 +881,10 @@ module.exports = {
   stripIcaoWrapper,
   hashRawDataGroups,
   validateRawDataGroups,
-  normalizeRequiredDataGroups,
   classifyCMSFailure,
   classifyChainFailure,
   loadFreshActiveDSCBundle,
   requireFreshActiveDSC,
+  parseCMSForFallback,
+  trySidTolerantVerify,
 };

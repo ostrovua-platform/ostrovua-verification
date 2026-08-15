@@ -8,3 +8,11 @@ Server/node_modules/
 # Local, reproducibility-only upstream checkout; production uses SHA-pinned
 # exported models plus the vendored Apache-2.0 license, not this 1 GB clone.
 Silent-Face-Anti-Spoofing/
+
+# Secrets — never commit (defense in depth; no secrets exist in this repo)
+.env
+.env.*
+*.key
+*.p12
+*.mobileprovision
+secrets/
