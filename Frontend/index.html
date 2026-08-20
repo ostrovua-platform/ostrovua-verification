@@ -495,13 +495,13 @@
     <div id="sec-dashboard" class="section">
       <div class="dash-row">
         <div class="dash-card">
-          <h3>📈 Приріст учасників по місяцях</h3>
+          <h3>Приріст учасників по місяцях</h3>
           <div class="chart-wrap" style="height:220px">
             <canvas id="chartTimeline"></canvas>
           </div>
         </div>
         <div class="dash-card">
-          <h3>🎯 Розподіл за ролями</h3>
+          <h3>Розподіл за ролями</h3>
           <div class="chart-wrap" style="height:160px">
             <canvas id="chartRoles"></canvas>
           </div>
@@ -509,7 +509,7 @@
         </div>
       </div>
       <div class="dash-card">
-        <h3>🕐 Останні зміни</h3>
+        <h3>Останні зміни</h3>
         <div id="dashActivity" class="act-feed"></div>
       </div>
     </div>
@@ -517,7 +517,7 @@
     <!-- ══ ACTIVITY SECTION ══ -->
     <div id="sec-activity" class="section">
       <div class="dash-card">
-        <h3>📋 Журнал активності</h3>
+        <h3>Журнал активності</h3>
         <div id="activityFeed" class="act-feed"></div>
       </div>
     </div>
@@ -556,10 +556,10 @@
 <!-- ══ ВЕРИФІКАЦІЯ ПРОФІЛЮ (NFC-паспорт, QR handoff на телефон) ══ -->
 <div class="overlay" id="verOverlay" onclick="bgClose(event,'verOverlay','closeVerify')">
   <div class="modal" style="max-width:500px">
-    <h2 style="margin-bottom:6px">🪪 Підтвердження особи</h2>
+    <h2 style="margin-bottom:6px">Підтвердження особи</h2>
     <p style="color:var(--muted);font-size:13px;margin-bottom:16px">Верифікація за біометричним паспортом через NFC у мобільному застосунку OstrovUA. Значок «Верифіковано» підвищує довіру до профілю.</p>
     <div id="verBody"></div>
-    <div class="ver-priv" style="margin-top:14px">🔒 <b>Паспортні дані не зберігаються.</b> Дані, селфі та чип звіряються на телефоні; на сервер іде лише результат (так/ні) — ні номера, ні фото, ні MRZ.</div>
+    <div class="ver-priv" style="margin-top:14px"><b>Паспортні дані не зберігаються.</b> Дані, селфі та чип звіряються на телефоні; на сервер іде лише результат (так/ні) — ні номера, ні фото, ні MRZ.</div>
     <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px">
       <button class="btn btn-ghost" onclick="closeVerify()">Закрити</button>
     </div>
@@ -700,7 +700,7 @@
 <!-- CONFIRM DELETE -->
 <div class="overlay" id="delOverlay" onclick="bgClose(event,'delOverlay','closeDel')">
 <div class="modal dmodal">
-  <div style="font-size:36px">🗑️</div>
+  <div style="font-size:36px"></div>
   <div style="font-size:18px;font-weight:700;margin-top:12px">Видалити запис?</div>
   <p>Цю дію не можна відмінити.</p>
   <div style="display:flex;gap:10px;justify-content:center">
@@ -804,7 +804,7 @@
       <div class="login-err" id="invAcErr"></div>
     </div>
     <div id="inviteInvalid" style="display:none;text-align:center;color:var(--muted);font-size:14px;padding:10px 0">
-      <div style="font-size:34px;margin-bottom:10px">⛔</div>
+      <div style="font-size:34px;margin-bottom:10px"></div>
       <div id="invAcInvalidMsg" style="color:var(--text);font-weight:600;margin-bottom:14px"></div>
       <button class="btn btn-ghost" onclick="goHome()">На головну</button>
     </div>
@@ -1110,7 +1110,7 @@ let currentContributorId = localStorage.getItem('me_contributor_id') || null;
 // ═══════════════════════════════════════════════════════════
 const statusLabel  = s => ({active:'Активний',pause:'На паузі',left:'Покинув'}[s]||'—');
 const statusCls    = s => ({active:'active',pause:'pause',left:'left'}[s]||'unknown');
-const consentLabel = c => ({full:'🟢 Повне',partial:'🔵 Часткове',anon:'🟡 Анонімне',none:'🔴 Не публікувати'}[c]||'—');
+const consentLabel = c => ({full:'Повне',partial:'Часткове',anon:'Анонімне',none:'Не публікувати'}[c]||'—');
 const consentCls   = c => ({full:'c-full',partial:'c-partial',anon:'c-anon',none:'c-none'}[c]||'');
 const consentHint  = c => ({
   full:    "Ім'я, фото та посилання видно всім",
@@ -1397,8 +1397,8 @@ function recordMiniHTML(r) {
     <div class="rec-desc">${esc(r.description)}</div>
     ${r.result?`<div class="rec-result"><b>Результат:</b> ${esc(r.result)}</div>`:''}
     <div class="rec-foot">
-      ${period?`<span>🗓 ${esc(period)}</span>`:''}
-      ${dt?`<span>📅 ${dt}</span>`:''}
+      ${period?`<span>${esc(period)}</span>`:''}
+      ${dt?`<span>${dt}</span>`:''}
       ${evs.length?`<span>🔗 ${evs.length} доказ${evs.length===1?'':'ів'}</span>`:''}
     </div>
     ${evs.length?`<div class="rec-ev">${evs.map(e=>`<a class="slink" href="${safeUrl(e.url)}" target="_blank" rel="noopener">${esc(e.label||e.url)}</a>`).join('')}</div>`:''}
@@ -1485,7 +1485,7 @@ async function openVerify() {
         }
         if (status === 'expired') {
           clearInterval(_verPoll);
-          el.innerHTML = '⌛ Час вийшов. <a href="#" onclick="openVerify();return false">Створити новий QR</a>';
+          el.innerHTML = 'Час вийшов. <a href="#" onclick="openVerify();return false">Створити новий QR</a>';
         }
       } catch (e) { /* мережева похибка — наступний тік */ }
     }, 3000);
@@ -2044,7 +2044,7 @@ async function saveEntry() {
     console.error('[saveRecord]', e);
     toast('✗ Помилка збереження. Спробуй пізніше.', 'err');
   } finally {
-    btn.innerHTML='💾 Зберегти'; btn.disabled=false;
+    btn.innerHTML='Зберегти'; btn.disabled=false;
   }
 }
 
@@ -2336,12 +2336,12 @@ function renderActivitySection() {
     <div class="eff-row">
       <div class="eff-name"><b>${esc(dispName(c) || c.name || '—')}</b><span class="eff-role">${esc(c.role||'')}</span></div>
       <div class="eff-metrics">
-        <span class="eff-chip" title="Всього вкладів">📦 ${s.total}</span>
-        <span class="eff-chip eff-acc" title="Прийнято">✅ ${s.acc}</span>
-        <span class="eff-chip eff-pend" title="На розгляді">⏳ ${s.pend}</span>
-        <span class="eff-chip eff-rej" title="Відхилено">❌ ${s.rej}</span>
-        <span class="eff-chip" title="% прийняття (з розглянутих)">📈 ${s.rate===null?'—':s.rate+'%'}</span>
-        <span class="eff-chip eff-last" title="Остання активність">🕓 ${s.last?new Date(s.last).toLocaleDateString('uk-UA'):'—'}</span>
+        <span class="eff-chip" title="Всього вкладів">${s.total}</span>
+        <span class="eff-chip eff-acc" title="Прийнято">${s.acc}</span>
+        <span class="eff-chip eff-pend" title="На розгляді">${s.pend}</span>
+        <span class="eff-chip eff-rej" title="Відхилено">${s.rej}</span>
+        <span class="eff-chip" title="% прийняття (з розглянутих)">${s.rate===null?'—':s.rate+'%'}</span>
+        <span class="eff-chip eff-last" title="Остання активність">${s.last?new Date(s.last).toLocaleDateString('uk-UA'):'—'}</span>
       </div>
     </div>`).join('')
     : `<div class="act-empty">Ще немає вкладів. Щойно учасники почнуть реєструвати вклади — тут з'явиться ефективність кожного (вклади, прийнято, % прийняття, остання активність).</div>`;
@@ -2349,11 +2349,11 @@ function renderActivitySection() {
   const feed = events.length ? events.map(activityItemHTML).join('') : '<div class="act-empty">Активності ще немає</div>';
   sec.innerHTML = `
     <div class="dash-card">
-      <h3>📊 Ефективність команди</h3>
+      <h3>Ефективність команди</h3>
       <div class="eff-list">${panel}</div>
     </div>
     <div class="dash-card" style="margin-top:20px">
-      <h3>📋 Журнал активності</h3>
+      <h3>Журнал активності</h3>
       <div class="act-feed">${feed}</div>
     </div>`;
 }
@@ -2413,7 +2413,7 @@ function renderProfile() {
       <div class="prof-header" style="padding-left:0;border-bottom:none;flex:1">
         <div class="prof-av-wrap" onclick="${isOwn ? "switchProfileTab('edit')" : ''}">
           <div class="prof-av">${avIn}</div>
-          ${isOwn ? '<div class="prof-av-cam">📷</div>' : ''}
+          ${isOwn ? '<div class="prof-av-cam"></div>' : ''}
         </div>
         <div class="prof-info">
           <div class="prof-name">${esc(dispName(c)) || '<span style="color:var(--muted);font-weight:400;font-style:italic;font-size:15px">Без імені</span>'}</div>
@@ -2421,7 +2421,7 @@ function renderProfile() {
           <div class="prof-badges" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
             <span class="sbadge s-${statusCls(c.status)}" style="position:static">${statusLabel(c.status)}</span>
             ${c.verified ? `<span class="verif-badge" title="Особу підтверджено">✓ Верифіковано</span>` : ''}
-            ${c.is_coordinator ? `<span class="coord-badge">🛡 Координатор${Array.isArray(c.coordinator_spheres)&&c.coordinator_spheres.length?': '+c.coordinator_spheres.map(typeLabel).join(', '):''}</span>` : ''}
+            ${c.is_coordinator ? `<span class="coord-badge">Координатор${Array.isArray(c.coordinator_spheres)&&c.coordinator_spheres.length?': '+c.coordinator_spheres.map(typeLabel).join(', '):''}</span>` : ''}
           </div>
         </div>
       </div>
@@ -2443,10 +2443,10 @@ function renderProfile() {
   if (profileTab === 'view') {
     const period = periodStr(c);
     const links = [
-      c.website  && ['🌐 Сайт',      c.website],
-      c.linkedin && ['💼 LinkedIn',   c.linkedin],
-      c.github   && ['💻 GitHub',     c.github],
-      c.social   && ['📱 Соцмережа', c.social],
+      c.website  && ['Сайт',      c.website],
+      c.linkedin && ['LinkedIn',   c.linkedin],
+      c.github   && ['GitHub',     c.github],
+      c.social   && ['Соцмережа', c.social],
     ].filter(Boolean);
 
     const recs = recordsByContributor[c.id] || [];
@@ -2666,7 +2666,7 @@ async function changePassword() {
   } catch(e) {
     if (errEl) errEl.textContent = e.message || 'Помилка зміни пароля';
   } finally {
-    if (btn) { btn.innerHTML = '🔑 Змінити пароль'; btn.disabled = false; }
+    if (btn) { btn.innerHTML = 'Змінити пароль'; btn.disabled = false; }
   }
 }
 
