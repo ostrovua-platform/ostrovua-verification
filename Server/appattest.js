@@ -198,6 +198,17 @@ function parseAuthData(authData) {
 const AAGUID_PROD = Buffer.from('appattest\0\0\0\0\0\0\0', 'ascii');
 const AAGUID_DEV  = Buffer.from('appattestdevelop', 'ascii');
 
+function parseAssertionAuthData(authData) {
+  if (!Buffer.isBuffer(authData) || authData.length < 37) throw new Error('authenticatorData закороткий');
+  // App Attest assertions use a shortened layout; their flags do not imply registration credential data.
+  // The full buffer, including any extensions, is verified by the signature before this header is read.
+  return {
+    rpIdHash: authData.subarray(0, 32),
+    flags: authData[32],
+    counter: authData.readUInt32BE(33),
+  };
+}
+
 // ── ATTESTATION: перша реєстрація ключа пристрою ─────────────────────────────
 // Повертає { publicKeyPem, environment } або кидає Error з причиною.
 function verifyAttestation({ attestationB64, keyIdB64, challengeBytes }) {
@@ -269,28 +280,101 @@ function verifyAttestation({ attestationB64, keyIdB64, challengeBytes }) {
 // bodyBytes — ДОСЛІВНІ байти тіла запиту (canonical payload клієнта).
 // Assertion привʼязаний до SHA256(challenge ‖ body): підмінити результати
 // перевірок після підпису неможливо (аудит P0-05).
-function verifyAssertion({ assertionB64, publicKeyPem, challengeBytes, bodyBytes, storedCounter }) {
-  const asrt = cbor.decodeFirstSync(strictBase64(assertionB64, 64 * 1024));
-  const { signature, authenticatorData } = asrt;
-  if (!signature || !authenticatorData) throw new Error('Некоректна assertion');
+function verifyAssertion({ assertionB64, publicKeyPem, challengeBytes, bodyBytes, storedCounter, storedEnvironment }) {
+  let failureCode = 'APP_ATTEST_KEY_ENVIRONMENT_INVALID';
+  const diagnostics = {};
+  const kind = (value) => {
+    if (Buffer.isBuffer(value)) return 'buffer';
+    if (value instanceof Uint8Array) return 'uint8array';
+    if (value instanceof Map) return 'map';
+    if (value instanceof cbor.Tagged) return 'tagged';
+    if (Array.isArray(value)) return 'array';
+    if (value === null) return 'null';
+    return ['object', 'string', 'number', 'boolean', 'undefined'].includes(typeof value)
+      ? typeof value : 'other';
+  };
+  let authenticatorData;
+  try {
+    // Assertions omit the attestation AAGUID. Trust only the environment saved
+    // at registration, so a later production switch cannot retain dev access.
+    if (storedEnvironment !== 'production' && storedEnvironment !== 'development') {
+      throw new Error('Невідоме середовище зареєстрованого App Attest ключа');
+    }
+    failureCode = 'APP_ATTEST_ENVIRONMENT_MISMATCH';
+    if (ATT_ENV === 'production' && storedEnvironment !== 'production') {
+      throw new Error('Development-ключ App Attest у прод-режимі');
+    }
+    failureCode = 'APP_ATTEST_BASE64_INVALID';
+    const encoded = strictBase64(assertionB64, 64 * 1024);
+    failureCode = 'APP_ATTEST_CBOR_INVALID';
+    let asrt;
+    try {
+      asrt = cbor.decodeFirstSync(encoded);
+    } catch (error) {
+      if (error?.name === 'UnexpectedDataError') failureCode = 'APP_ATTEST_CBOR_TRAILING_DATA';
+      throw error;
+    }
+    failureCode = 'APP_ATTEST_SHAPE_INVALID';
+    diagnostics.containerKind = kind(asrt);
+    const { signature, authenticatorData: decodedAuthData } = asrt;
+    authenticatorData = decodedAuthData;
+    diagnostics.signatureKind = kind(signature);
+    diagnostics.authDataKind = kind(authenticatorData);
+    if (Buffer.isBuffer(signature) || signature instanceof Uint8Array) diagnostics.signatureBytes = signature.byteLength;
+    if (Buffer.isBuffer(authenticatorData) || authenticatorData instanceof Uint8Array) {
+      diagnostics.authDataBytes = authenticatorData.byteLength;
+      if (authenticatorData.byteLength > 32) diagnostics.flags = authenticatorData[32];
+    }
+    if (!signature || !authenticatorData) throw new Error('Некоректна assertion');
 
-  // Тіло ОБОВʼЯЗКОВЕ: жодного «якщо тіла немає — перевіримо лише
-  // challenge» (це був би downgrade-вектор).
-  if (!bodyBytes || !bodyBytes.length) throw new Error('Порожнє тіло для assertion');
-  const clientDataHash = sha256(Buffer.concat([challengeBytes, bodyBytes]));
-  const nonce = sha256(Buffer.concat([authenticatorData, clientDataHash]));
+    // Тіло ОБОВʼЯЗКОВЕ: жодного «якщо тіла немає — перевіримо лише
+    // challenge» (це був би downgrade-вектор).
+    failureCode = 'APP_ATTEST_BODY_MISSING';
+    if (!bodyBytes || !bodyBytes.length) throw new Error('Порожнє тіло для assertion');
+    failureCode = 'APP_ATTEST_HASH_INPUT_INVALID';
+    const clientDataHash = sha256(Buffer.concat([challengeBytes, bodyBytes]));
+    const nonce = sha256(Buffer.concat([authenticatorData, clientDataHash]));
 
-  const ok = crypto.createVerify('SHA256').update(nonce).verify(publicKeyPem, signature);
-  if (!ok) throw new Error('Підпис assertion невалідний');
+    failureCode = 'APP_ATTEST_CRYPTO_ERROR';
+    const ok = crypto.createVerify('SHA256').update(nonce).verify(publicKeyPem, signature);
+    if (!ok) {
+      failureCode = 'APP_ATTEST_SIGNATURE_INVALID';
+      throw new Error('Підпис assertion невалідний');
+    }
 
-  const ad = parseAuthData(authenticatorData);
-  if (!crypto.timingSafeEqual(ad.rpIdHash, sha256(Buffer.from(APP_ID)))) {
-    throw new Error('rpIdHash assertion не збігається');
+    failureCode = 'APP_ATTEST_INTERNAL_ERROR';
+    const ad = parseAssertionAuthData(authenticatorData);
+    if (!crypto.timingSafeEqual(ad.rpIdHash, sha256(Buffer.from(APP_ID)))) {
+      failureCode = 'APP_ATTEST_APP_ID_MISMATCH';
+      throw new Error('rpIdHash assertion не збігається');
+    }
+    if (ad.counter <= storedCounter) {
+      failureCode = 'APP_ATTEST_COUNTER_REPLAY';
+      throw new Error(`Replay: counter ${ad.counter} <= ${storedCounter}`);
+    }
+    return ad.counter;
+  } catch (error) {
+    if (failureCode === 'APP_ATTEST_INTERNAL_ERROR') {
+      if (error?.message === 'authenticatorData закороткий') {
+        failureCode = Buffer.isBuffer(authenticatorData)
+          ? 'APP_ATTEST_AUTH_DATA_TRUNCATED' : 'APP_ATTEST_AUTH_DATA_TYPE_INVALID';
+      } else if (error?.message === 'credentialId обрізаний') {
+        failureCode = 'APP_ATTEST_CREDENTIAL_DATA_TRUNCATED';
+      }
+    }
+    if (failureCode === 'APP_ATTEST_CRYPTO_ERROR') {
+      diagnostics.cryptoError = ['ERR_OSSL_UNSUPPORTED', 'ERR_INVALID_ARG_TYPE', 'ERR_CRYPTO_UNSUPPORTED_OPERATION']
+        .includes(error?.code) ? error.code : 'OTHER';
+    }
+    // Keep the original failure behavior; only server-owned diagnostic fields are added.
+    try {
+      Object.defineProperties(error, {
+        appAttestFailureCode: { value: failureCode },
+        appAttestDiagnostics: { value: diagnostics },
+      });
+    } catch (_) { /* Diagnostic annotation must never replace the original failure. */ }
+    throw error;
   }
-  if (ad.counter <= storedCounter) {
-    throw new Error(`Replay: counter ${ad.counter} <= ${storedCounter}`);
-  }
-  return ad.counter;
 }
 
 module.exports = {

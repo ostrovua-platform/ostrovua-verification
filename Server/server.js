@@ -1680,6 +1680,10 @@ app.post('/auth/verify/attest-key', rateLimit, async (req, res) => {
 
 // Assertion iOS: headers x-app-attest (b64 CBOR) + x-attest-key (b64 keyId),
 // body.challengeId — челендж, виданий цьому користувачу.
+const APP_ATTEST_DIAGNOSTIC_CODES = new Set([
+  'APP_ATTEST_KEY_ENVIRONMENT_INVALID', 'APP_ATTEST_ENVIRONMENT_MISMATCH',
+]);
+
 async function verifyAppAttestAssertion(req, contributorId) {
   const assertionB64 = req.headers['x-app-attest'];
   const keyId        = req.headers['x-attest-key'];
@@ -1693,7 +1697,7 @@ async function verifyAppAttestAssertion(req, contributorId) {
     const d = await hasuraAdmin(
       `query($k: String!, $c: uuid!) {
          attest_keys(where:{key_id:{_eq:$k}, contributor_id:{_eq:$c}}, limit:1)
-         { key_id public_key_pem counter }
+         { key_id public_key_pem counter environment }
        }`,
       { k: keyId, c: contributorId }
     );
@@ -1705,17 +1709,18 @@ async function verifyAppAttestAssertion(req, contributorId) {
       challengeBytes,
       bodyBytes: req.rawBody,          // дослівні байти canonical payload
       storedCounter: rec.counter,
+      storedEnvironment: rec.environment,
     });
     // АТОМАРНО (compare-and-swap, аудит P1-03): counter приймається
     // лише якщо в БАЗІ він досі менший — два паралельні запити з тим
     // самим assertion не пройдуть обидва (перший виграє, другий — 0 рядків).
     const upd = await hasuraAdmin(
-      `mutation($k: String!, $n: bigint!, $at: timestamptz!) {
+      `mutation($k: String!, $c: uuid!, $e: String!, $n: bigint!, $at: timestamptz!) {
          update_attest_keys(
-           where:{ key_id:{_eq:$k}, counter:{_lt:$n} },
+           where:{ key_id:{_eq:$k}, contributor_id:{_eq:$c}, environment:{_eq:$e}, counter:{_lt:$n} },
            _set:{ counter:$n, last_used_at:$at }) { affected_rows }
        }`,
-      { k: keyId, n: newCounter, at: new Date().toISOString() }
+      { k: keyId, c: contributorId, e: rec.environment, n: newCounter, at: new Date().toISOString() }
     );
     if ((upd.update_attest_keys?.affected_rows ?? 0) !== 1) {
       console.warn('[verify/assertion] counter CAS conflict (можливий replay)');
@@ -1723,7 +1728,8 @@ async function verifyAppAttestAssertion(req, contributorId) {
     }
     return true;
   } catch (e) {
-    console.warn('[verify/assertion]', e.message);
+    console.warn('[verify/assertion]', APP_ATTEST_DIAGNOSTIC_CODES.has(e?.appAttestFailureCode)
+      ? e.appAttestFailureCode : 'APP_ATTEST_INTERNAL_ERROR');
     return false;
   }
 }
