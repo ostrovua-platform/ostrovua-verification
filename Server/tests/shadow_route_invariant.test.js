@@ -4,6 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const vm = require('node:vm');
+const crypto = require('node:crypto');
 
 test('evaluation-only route exits before every document-token and database mutation', () => {
   const source = fs.readFileSync(
@@ -32,6 +34,37 @@ test('evaluation-only route exits before every document-token and database mutat
   assert.doesNotMatch(branch, /hasuraSQL|activate_self_hosted_verified_id|docToken/);
 });
 
+test('both passive-auth calls receive the server-selected calibration mode', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const start = source.indexOf('  let pa;', source.indexOf("app.post('/auth/verify/approve'"));
+  const end = source.indexOf("  if (pa.status !== 'passed')", start);
+  assert.ok(start > 0 && end > start);
+  for (const evaluationOnly of [false, true]) {
+    const calls = [];
+    const dgHashes = { dg1: { sha256: '11'.repeat(32) }, dg2: { sha256: '22'.repeat(32) } };
+    const context = { Buffer, crypto, console, evaluationOnly, protocolVersion: 7,
+      verificationPolicy: { PROTOCOL_VERSION: 7, deriveSequence: () => ['blink'] },
+      body: { biometricEnvelope: { contract: 'synthetic' } },
+      req: { rawBody: Buffer.from('synthetic') },
+      res: { status() { throw new Error('valid synthetic evidence must not reject'); } },
+      sod: 'synthetic-sod', dgHashes, activeAuthentication: 'passed',
+      activeChallengeBytes: Buffer.alloc(32, 3), documentChallengeBytes: Buffer.alloc(32, 4),
+      parseSelfHostedEnvelope: value => value,
+      passiveauth: { verifySOD: async input => { calls.push(input); return { status: 'passed' }; } },
+      biometricClient: { verifySelfHostedBiometrics: async () => ({
+        evaluationOnly, dgHashes, documentAuthentication: { activeAuthentication: 'passed' },
+      }) },
+    };
+    await vm.runInNewContext(`(async () => {${source.slice(start, end)}})()`, context);
+    assert.equal(calls.length, 2);
+    for (const call of calls) {
+      assert.equal(call.evaluationOnly, evaluationOnly);
+      assert.equal(call.sodBase64, 'synthetic-sod');
+      assert.equal(call.dgHashes, dgHashes);
+    }
+  }
+});
+
 test('calibration challenge lane is allowlisted and never weakens production limits', () => {
   const source = fs.readFileSync(
     path.join(__dirname, '..', 'server.js'), 'utf8');
@@ -56,12 +89,10 @@ test('calibration challenge lane is allowlisted and never weakens production lim
   assert.match(approval, /expectedChallengePurpose/);
   assert.match(approval, /evaluationOnly[\s\S]*liveness_calibration[\s\S]*liveness/);
   assert.match(approval, /evaluationOnly[\s\S]*document_auth_calibration[\s\S]*document_auth/);
-  assert.match(
-    approval,
-    /const paRequiredDataGroups = evaluationOnly[\s\S]*\['dg1', 'dg2'\][\s\S]*:\s*undefined/
-  );
-  assert.match(
-    approval,
-    /verifySOD\(\{[\s\S]*requiredDataGroups:\s*paRequiredDataGroups/
-  );
+  const calls = [...approval.matchAll(/passiveauth\.verifySOD\(\{([\s\S]*?)\}\)/g)];
+  assert.equal(calls.length, 2, 'both precheck and authoritative PA must remain bound to server mode');
+  for (const call of calls) {
+    assert.match(call[1], /evaluationOnly/);
+    assert.doesNotMatch(call[1], /requiredDataGroups/);
+  }
 });

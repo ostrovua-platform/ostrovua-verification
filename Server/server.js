@@ -324,7 +324,8 @@ function rlLockedMessage(until) {
 }
 
 // ── FIND OR CREATE CONTRIBUTOR (for OAuth) ────────────────────────────────────
-async function findOrCreateContributor({ email, name, photo_url, provider, provider_id }) {
+async function findOrCreateContributor({ email, emailVerified = false, name, photo_url, provider, provider_id }) {
+  const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : null;
   // 1. Try find by OAuth provider ID — most reliable, works even without email
   if (provider && provider_id) {
     const found = await hasuraAdmin(
@@ -337,26 +338,30 @@ async function findOrCreateContributor({ email, name, photo_url, provider, provi
     if (found.contributors?.[0]) return withTheme(found.contributors[0]);
   }
 
-  // 2. Try find by email (e.g. user registered via email/password earlier)
-  if (email) {
+  // Email may link an existing account only when verified by the provider.
+  if (normalizedEmail && emailVerified === true) {
     const found = await hasuraAdmin(
       `query($email: String!) {
          contributors(where:{email:{_eq:$email}}, limit:1)
-         { id name role photo_url consent_level password_hash }
+         { id name role photo_url consent_level password_hash oauth_provider oauth_provider_id }
        }`,
-      { email }
+      { email: normalizedEmail }
     );
     if (found.contributors?.[0]) {
       const existing = found.contributors[0];
+      if (existing.oauth_provider_id &&
+          (existing.oauth_provider !== provider || existing.oauth_provider_id !== String(provider_id))) {
+        throw new Error('До цього email уже привʼязаний інший спосіб входу.');
+      }
       // Link OAuth provider to this account so next login uses provider_id lookup
       if (provider && provider_id && !existing.oauth_provider_id) {
         await hasuraAdmin(
           `mutation($id: uuid!, $pid: String!, $prov: String!) {
-             update_contributors_by_pk(pk_columns:{id:$id}, _set:{oauth_provider_id:$pid, oauth_provider:$prov})
-             { id }
+             update_contributors(where:{id:{_eq:$id}, oauth_provider_id:{_is_null:true}},
+               _set:{oauth_provider_id:$pid, oauth_provider:$prov}) { affected_rows }
            }`,
           { id: existing.id, pid: String(provider_id), prov: provider }
-        ).catch(() => {}); // non-fatal
+        );
       }
       return withTheme(existing);
     }
@@ -369,7 +374,7 @@ async function findOrCreateContributor({ email, name, photo_url, provider, provi
      }`,
     { obj: {
         name:              name || 'OAuth User',
-        email:             email || null,
+        email:             emailVerified === true ? normalizedEmail : null,
         role:              'Учасник',
         status:            'active',
         description:       '',
@@ -727,9 +732,10 @@ if (GOOGLE_CLIENT_ID) {
   }, async (accessToken, refreshToken, profile, done) => {
     try {
       const email    = profile.emails?.[0]?.value;
+      const emailVerified = profile._json?.email_verified === true;
       const name     = profile.displayName;
       const photo    = profile.photos?.[0]?.value;
-      const contrib  = await findOrCreateContributor({ email, name, photo_url: photo, provider: 'google', provider_id: profile.id });
+      const contrib  = await findOrCreateContributor({ email, emailVerified, name, photo_url: photo, provider: 'google', provider_id: profile.id });
       done(null, contrib);
     } catch (e) { done(e); }
   }));
@@ -761,10 +767,11 @@ if (GITHUB_CLIENT_ID) {
     callbackURL:  `${AUTH_BASE_URL}/auth/github/callback`,
   }, async (accessToken, refreshToken, profile, done) => {
     try {
-      const email   = profile.emails?.find(e => e.primary)?.value || profile.emails?.[0]?.value;
+      const verifiedEmail = profile.emails?.find(e => e.primary && e.verified) || profile.emails?.find(e => e.verified);
+      const email   = verifiedEmail?.value;
       const name    = profile.displayName || profile.username;
       const photo   = profile.photos?.[0]?.value;
-      const contrib = await findOrCreateContributor({ email, name, photo_url: photo, provider: 'github', provider_id: profile.id });
+      const contrib = await findOrCreateContributor({ email, emailVerified: !!verifiedEmail, name, photo_url: photo, provider: 'github', provider_id: profile.id });
       done(null, contrib);
     } catch (e) { done(e); }
   }));
@@ -2177,9 +2184,6 @@ app.post('/auth/verify/approve', rateLimit, async (req, res) => {
   let pa;
   let serverBiometrics = null;
   let opaqueEnvelope = null;
-  const paRequiredDataGroups = evaluationOnly
-    ? ['dg1', 'dg2']
-    : undefined;
   try {
     if (protocolVersion === verificationPolicy.PROTOCOL_VERSION) {
       opaqueEnvelope = parseSelfHostedEnvelope(body.biometricEnvelope);
@@ -2188,7 +2192,7 @@ app.post('/auth/verify/approve', rateLimit, async (req, res) => {
     pa = await passiveauth.verifySOD({
       sodBase64: sod,
       dgHashes,
-      requiredDataGroups: paRequiredDataGroups,
+      evaluationOnly,
     });
 
     if (pa.status === 'passed' && opaqueEnvelope) {
@@ -2218,7 +2222,7 @@ app.post('/auth/verify/approve', rateLimit, async (req, res) => {
       pa = await passiveauth.verifySOD({
         sodBase64: sod,
         dgHashes: serverBiometrics.dgHashes,
-        requiredDataGroups: paRequiredDataGroups,
+        evaluationOnly,
       });
       const documentResult = serverBiometrics.documentAuthentication;
       if (!documentResult ||
@@ -2876,8 +2880,10 @@ app.post('/auth/device-token/remove', rateLimit, async (req, res) => {
 
   try {
     await hasuraAdmin(
-      `mutation($t: String!) { delete_device_tokens_by_pk(token: $t) { token } }`,
-      { t: token }
+      `mutation($t: String!, $c: uuid!) {
+         delete_device_tokens(where:{token:{_eq:$t}, contributor_id:{_eq:$c}}) { affected_rows }
+       }`,
+      { t: token, c: contributorId }
     );
     return res.json({ ok: true });
   } catch (e) {
